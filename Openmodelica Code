@@ -1,0 +1,1103 @@
+package PEMFuelCell
+  package Functions
+    constant Real R = Modelica.Constants.R "Universal gas constant, J/(mol.K)";
+    constant Real F = 96485.33212 "Faraday's constant, C/mol";
+
+    function nernstVoltage "Reversible cell voltage. Pressures given in Pa; normalized internally to standard pressure (101325 Pa)."
+      input Real T "K";
+      input Real p_H2 "Pa";
+      input Real p_O2 "Pa";
+      input Real p_H2O "Pa";
+      input Real E0 "Standard potential at 298K, V";
+      output Real E;
+    protected
+      Real E0_T;
+      constant Real p_std = 101325 "Standard pressure, Pa";
+      Real p_H2_safe;
+      Real p_O2_safe;
+      Real p_H2O_safe;
+    algorithm
+      E0_T := E0 - 0.85e-3*(T - 298.15);
+// Prevent domain errors (log of <=0 or sqrt of <0)
+      p_H2_safe := max(p_H2, 1.0);
+      p_O2_safe := max(p_O2, 1.0);
+      p_H2O_safe := max(p_H2O, 1.0);
+      E := E0_T + (R*T)/(2*F)*log((p_H2_safe/p_std)*sqrt(p_O2_safe/p_std)/(p_H2O_safe/p_std));
+    end nernstVoltage;
+
+    function activationLoss
+      input Real i "current density, A/m2";
+      input Real i0 "exchange current density";
+      input Real b "Tafel slope, V";
+      output Real dV;
+    algorithm
+      dV := b*log(i/i0);
+    end activationLoss;
+
+    function concentrationLoss
+      input Real i;
+      input Real iL "limiting current density";
+      input Real c "= R*T/(n*F)";
+      output Real dV;
+    algorithm
+      dV := c*log(iL/max((iL - i), 1e-3));
+    end concentrationLoss;
+
+    function activationOverpotentialBV
+      input Real i "Signed current density, A/m2";
+      input Real i0 "Exchange current density, A/m2";
+      input Real alpha "Charge transfer coefficient";
+      input Real T "Temperature, K";
+      output Real eta "Signed activation overpotential, V";
+    protected
+      constant Real n = 2;
+    algorithm
+      if abs(alpha - 0.5) < 1e-10 then
+        eta := 2*PEMFuelCell.Functions.R*T/(n*PEMFuelCell.Functions.F)*Modelica.Math.asinh(i/(2*i0));
+      else
+// Fallback: Tafel approximation for non-0.5 alpha
+        eta := PEMFuelCell.Functions.R*T/(alpha*n*PEMFuelCell.Functions.F)*log(1 + abs(i)/i0)*sign(i);
+      end if;
+    end activationOverpotentialBV;
+
+    function concentrationLossURFC
+      input Real i_density;
+      input Real iL;
+      input Real c;
+      output Real dV_conc;
+    protected
+      Real arg;
+    algorithm
+//safety boundary of 1e-5 to prevent log(0)
+      arg := max(1 - abs(i_density)/iL, 1e-5);
+      dV_conc := -c*log(arg);
+    end concentrationLossURFC;
+
+    function activationLossURFC "Log-free Butler-Volmer activation overpotential valid for all i"
+      input Real i "Signed current density, A/m2";
+      input Real i0 "Exchange current density, A/m2";
+      input Real T "Temperature, K";
+      output Real eta "Signed activation overpotential, V";
+    algorithm
+      eta := 2*PEMFuelCell.Functions.R*T/(2*PEMFuelCell.Functions.F)*Modelica.Math.asinh(i/(2*i0));
+    end activationLossURFC;
+
+    function concentrationLossLinearURFC "Log-free mass-transfer resistance model valid for all i"
+      input Real i "Signed current density, A/m2";
+      input Real R_conc "Mass transport area-specific resistance, Ohm.m2";
+      output Real dV_conc "Signed concentration loss, V";
+    algorithm
+      dV_conc := i*R_conc;
+    end concentrationLossLinearURFC;
+  end Functions;
+
+  package Models
+    block ThermalManagementSystem "Wrapper around ThermalMass - reusable thermal subsystem"
+      parameter Real C_th = 40000 "Thermal capacitance, J/K";
+      parameter Real E_tn = 1.481 "Thermoneutral voltage per cell, V";
+      parameter Real epsilon = 0.8 "Heat exchanger effectiveness";
+      parameter Real m_dot_cool = 0.18 "Coolant mass flow rate, kg/s";
+      parameter Real cp_cool = 4180 "Coolant specific heat capacity, J/(kg.K)";
+      parameter Real T_cool_in = 298.15 "Coolant inlet temperature, K";
+      parameter Integer N_cells = 455 "Number of cells in stack";
+      Modelica.Blocks.Interfaces.RealInput I_stack "Stack current, A" annotation(
+        Placement(transformation(extent = {{-120, 30}, {-100, 50}})));
+      Modelica.Blocks.Interfaces.RealInput V_cell_in "Cell voltage, V" annotation(
+        Placement(transformation(extent = {{-120, -50}, {-100, -30}})));
+      Modelica.Blocks.Interfaces.RealOutput T_out "Stack temperature, K" annotation(
+        Placement(transformation(extent = {{100, -10}, {120, 10}})));
+      PEMFuelCell.Models.ThermalMass thermal(C_th = C_th, E_tn = E_tn, epsilon = epsilon, m_dot_cool = m_dot_cool, cp_cool = cp_cool, T_cool_in = T_cool_in, N_cells = N_cells);
+    equation
+      connect(I_stack, thermal.I);
+      connect(V_cell_in, thermal.V_cell);
+      T_out = thermal.T;
+      annotation(
+        Icon(coordinateSystem(preserveAspectRatio = false, extent = {{-100, -100}, {100, 100}}), graphics = {Rectangle(extent = {{-100, 100}, {100, -100}}, lineColor = {0, 0, 0}, fillColor = {230, 230, 230}, fillPattern = FillPattern.Solid), Text(extent = {{-90, 20}, {90, -20}}, textString = "Thermal Mgmt")}));
+    end ThermalManagementSystem;
+
+    block AirSupplySystem
+      parameter Real V_O2 = 0.02 "Manifold volume, m3";
+      Modelica.Blocks.Interfaces.RealInput T "Operating temperature, K" annotation(
+        Placement(transformation(extent = {{-120, 70}, {-100, 90}})));
+      parameter Integer N_cells = 455 "Number of cells consuming O2";
+      parameter Real lambda_O2 = 2.0 "Stoichiometric excess ratio";
+      parameter Real p_target_O2 = 21278.25 "Target manifold pressure, Pa";
+      parameter Real k_out_O2 = 2e-5 "Outlet flow coefficient, mol/(s.Pa)";
+      Modelica.Blocks.Interfaces.RealInput I_stack "Stack current, A" annotation(
+        Placement(transformation(extent = {{-120, -10}, {-100, 10}})));
+      Modelica.Blocks.Interfaces.RealOutput p_O2_out "O2 partial pressure, Pa" annotation(
+        Placement(transformation(extent = {{100, -10}, {120, 10}})));
+      PEMFuelCell.Models.OxygenManifold manifold(V_O2 = V_O2, N_cells = N_cells, lambda_O2 = lambda_O2, p_target_O2 = p_target_O2, k_out_O2 = k_out_O2);
+    equation
+      connect(I_stack, manifold.I);
+      connect(T, manifold.T);
+      p_O2_out = manifold.p_O2;
+      annotation(
+        Icon(coordinateSystem(preserveAspectRatio = false, extent = {{-100, -100}, {100, 100}}), graphics = {Rectangle(extent = {{-100, 100}, {100, -100}}, lineColor = {0, 0, 0}, fillColor = {230, 230, 230}, fillPattern = FillPattern.Solid), Text(extent = {{-90, 20}, {90, -20}}, textString = "Air Supply")}));
+    end AirSupplySystem;
+
+    block HydrogenSupplySystem
+      parameter Real V_H2 = 0.01 "Manifold volume, m3";
+      Modelica.Blocks.Interfaces.RealInput T "Operating temperature, K" annotation(
+        Placement(transformation(extent = {{-120, 70}, {-100, 90}})));
+      parameter Integer N_cells = 455 "Number of cells drawing H2";
+      parameter Real lambda_H2 = 1.5 "Stoichiometric excess ratio";
+      parameter Real p_target_H2 = 151987.5 "Target manifold pressure, Pa";
+      parameter Real k_out_H2 = 2e-5 "Outlet flow coefficient, mol/(s.Pa)";
+      Modelica.Blocks.Interfaces.RealInput I_stack "Stack current, A" annotation(
+        Placement(transformation(extent = {{-120, -10}, {-100, 10}})));
+      Modelica.Blocks.Interfaces.RealOutput p_H2_out "H2 partial pressure, Pa" annotation(
+        Placement(transformation(extent = {{100, -10}, {120, 10}})));
+      PEMFuelCell.Models.HydrogenManifold manifold(V_H2 = V_H2, N_cells = N_cells, lambda_H2 = lambda_H2, p_target_H2 = p_target_H2, k_out_H2 = k_out_H2);
+    equation
+      connect(I_stack, manifold.I);
+      connect(T, manifold.T);
+      p_H2_out = manifold.p_H2;
+      annotation(
+        Icon(coordinateSystem(preserveAspectRatio = false, extent = {{-100, -100}, {100, 100}}), graphics = {Rectangle(extent = {{-100, 100}, {100, -100}}, lineColor = {0, 0, 0}, fillColor = {230, 230, 230}, fillPattern = FillPattern.Solid), Text(extent = {{-90, 20}, {90, -20}}, textString = "H2 Supply")}));
+    end HydrogenSupplySystem;
+
+    block PolarizationCurveBlock
+      Modelica.Blocks.Interfaces.RealInput T "Operating temperature, K" annotation(
+        Placement(transformation(extent = {{-120, 70}, {-100, 90}})));
+      Modelica.Blocks.Interfaces.RealInput p_O2 "O2 partial pressure, Pa" annotation(
+        Placement(transformation(extent = {{-120, -90}, {-100, -70}})));
+      parameter Real p_H2O = 101325 "H2O partial pressure, Pa";
+      Modelica.Blocks.Interfaces.RealInput i_density "Current density, A/m2" annotation(
+        Placement(transformation(extent = {{-120, 30}, {-100, 50}})));
+      Modelica.Blocks.Interfaces.RealInput p_H2 "H2 partial pressure, Pa" annotation(
+        Placement(transformation(extent = {{-120, -50}, {-100, -30}})));
+      Modelica.Blocks.Interfaces.RealOutput V_cell(start = 1.0, fixed = true) "Cell voltage, V" annotation(
+        Placement(transformation(extent = {{100, -10}, {120, 10}})));
+      parameter Real i0 = 1e-3 "Exchange current density, A/m2";
+      parameter Real alpha = 0.5 "Charge transfer coefficient";
+      parameter Real E0 = 1.229 "Standard reversible potential at 298K, V";
+      parameter Real R_ohmic = 0.15e-4 "Ohmic area-specific resistance, Ohm.m2";
+      parameter Real iL = 15000 "Limiting current density, A/m2";
+      parameter Real tau = 2 "Voltage relaxation time constant, s";
+      Real V_cell_static "Instantaneous (algebraic) cell voltage, V";
+      Real E_nernst "Reversible voltage, V";
+      Real b "Tafel slope, V";
+      Real c "Concentration loss coefficient, V";
+      Real dV_act "Activation voltage loss, V";
+      Real dV_ohmic "Ohmic voltage loss, V";
+      Real dV_conc "Concentration voltage loss, V";
+    equation
+      E_nernst = PEMFuelCell.Functions.nernstVoltage(T, p_H2, p_O2, p_H2O, E0);
+      b = PEMFuelCell.Functions.R*T/(alpha*2*PEMFuelCell.Functions.F);
+      c = PEMFuelCell.Functions.R*T/(2*PEMFuelCell.Functions.F);
+      dV_act = PEMFuelCell.Functions.activationLoss(i_density, i0, b);
+      dV_ohmic = i_density*R_ohmic;
+      dV_conc = PEMFuelCell.Functions.concentrationLoss(i_density, iL, c);
+      V_cell_static = E_nernst - dV_act - dV_ohmic - dV_conc;
+      tau*der(V_cell) = V_cell_static - V_cell;
+      annotation(
+        Icon(coordinateSystem(preserveAspectRatio = false, extent = {{-100, -100}, {100, 100}}), graphics = {Rectangle(extent = {{-100, 100}, {100, -100}}, lineColor = {0, 0, 0}, fillColor = {230, 230, 230}, fillPattern = FillPattern.Solid), Text(extent = {{-90, 20}, {90, -20}}, textString = "Pol.curve")}));
+    end PolarizationCurveBlock;
+
+    model NernstOnly "Step 1: reversible (open-circuit) voltage only, no losses, no current"
+      parameter Real T = 353.15 "Operating temperature, K (353.15 K = 80 degC)";
+      parameter Real p_H2 = 151987.5 "H2 partial pressure, atm";
+      parameter Real p_O2 = 101325 "O2 partial pressure, atm";
+      parameter Real p_H2O = 101325 "H2O partial pressure, atm";
+      parameter Real E0 = 1.229 "Standard reversible potential at 298K, V";
+      Real E "Reversible cell voltage, V";
+    equation
+      E = PEMFuelCell.Functions.nernstVoltage(T, p_H2, p_O2, p_H2O, E0);
+    end NernstOnly;
+
+    model OhmicLoss "Step 3: Nernst voltage minus activation loss minus ohmic loss"
+      parameter Real T = 353.15 "Operating temperature, K";
+      parameter Real p_H2 = 151987.5 "H2 partial pressure, Pa";
+      parameter Real p_O2 = 101325 "O2 partial pressure, Pa";
+      parameter Real p_H2O = 101325 "H2O partial pressure, Pa";
+      parameter Real i = 5000 "Current density, A/m2";
+      parameter Real i0 = 1e-3 "Exchange current density, A/m2";
+      parameter Real E0 = 1.229 "Standard reversible potential at 298K, V";
+      parameter Real alpha = 0.5 "Charge transfer coefficient";
+      parameter Real R_ohmic = 0.15e-4 "Ohmic area-specific resistance, Ohm.m2";
+      Real E_nernst "Reversible voltage, V";
+      Real b "Tafel slope, V";
+      Real dV_act "Activation voltage loss, V";
+      Real dV_ohmic "Ohmic voltage loss, V";
+      Real V_cell "Cell voltage after activation and ohmic losses, V";
+    equation
+      E_nernst = PEMFuelCell.Functions.nernstVoltage(T, p_H2, p_O2, p_H2O, E0);
+      b = PEMFuelCell.Functions.R*T/(alpha*2*PEMFuelCell.Functions.F);
+      dV_act = PEMFuelCell.Functions.activationLoss(i, i0, b);
+      dV_ohmic = i*R_ohmic;
+      V_cell = E_nernst - dV_act - dV_ohmic;
+    end OhmicLoss;
+
+    model PolarizationCurve
+      parameter Real T = 353.15 "Operating temperature, K";
+      parameter Real p_H2 = 151987.5 "H2 partial pressure, Pa";
+      parameter Real p_O2 = 101325 "O2 partial pressure, Pa";
+      parameter Real p_H2O = 101325 "H2O partial pressure, Pa";
+      parameter Real E0 = 1.04 "Standard reversible potential at 298K, V";
+      parameter Real i = 5000 "Current density, A/m2";
+      parameter Real i0 = 1e-3 "Exchange current density, A/m2";
+      parameter Real alpha = 0.5 "Charge transfer coefficient";
+      parameter Real R_ohmic = 0.15e-4 "Ohmic area-specific resistance, Ohm.m2";
+      parameter Real iL = 15000 "Limiting current density, A/m2";
+      Real E_nernst "Reversible voltage, V";
+      Real b "Tafel slope, V";
+      Real c "Concentration loss coefficient, V";
+      Real dV_act "Activation voltage loss, V";
+      Real dV_ohmic "Ohmic voltage loss, V";
+      Real dV_conc "Concentration voltage loss, V";
+      Real V_cell "Cell voltage after all losses, V";
+    equation
+      E_nernst = PEMFuelCell.Functions.nernstVoltage(T, p_H2, p_O2, p_H2O, E0);
+      b = PEMFuelCell.Functions.R*T/(alpha*2*PEMFuelCell.Functions.F);
+      c = PEMFuelCell.Functions.R*T/(2*PEMFuelCell.Functions.F);
+      dV_act = PEMFuelCell.Functions.activationLoss(i, i0, b);
+      dV_ohmic = i*R_ohmic;
+      dV_conc = PEMFuelCell.Functions.concentrationLoss(i, iL, c);
+      V_cell = E_nernst - dV_act - dV_ohmic - dV_conc;
+    end PolarizationCurve;
+
+    model PEMCell
+      extends Modelica.Electrical.Analog.Interfaces.OnePort;
+      parameter Real T = 353.15 "Operating temperature, K";
+      parameter Real p_H2 = 151987.5 "H2 partial pressure, Pa";
+      parameter Real p_O2 = 101325 "O2 partial pressure, Pa";
+      parameter Real p_H2O = 101325 "H2O partial pressure, Pa";
+      parameter Real i0 = 1e-3 "Exchange current density, A/m2";
+      parameter Real E0 = 1.229 "Standard reversible potential at 298K, V";
+      parameter Real alpha = 0.5 "Charge transfer coefficient";
+      parameter Real R_ohmic = 0.15e-4 "Ohmic area-specific resistance, Ohm.m2";
+      parameter Real iL = 15000 "Limiting current density, A/m2";
+      parameter Real A_cell = 0.01 "Active cell area, m2";
+      PEMFuelCell.Models.PolarizationCurveBlock polCurve(T = T, p_H2 = p_H2, p_O2 = p_O2, p_H2O = p_H2O, E0 = E0, i0 = i0, alpha = alpha, R_ohmic = R_ohmic, iL = iL);
+    equation
+      polCurve.i_density = i/A_cell;
+// electrical current -> current density, into the block
+      v = polCurve.V_cell;
+// block's voltage output -> electrical voltage
+    end PEMCell;
+
+    model PEMStack
+      extends Modelica.Electrical.Analog.Interfaces.OnePort;
+      parameter Integer N_cells = 455;
+      parameter Real T = 353.15;
+      parameter Real p_O2 = 101325;
+      parameter Real p_H2O = 101325;
+      parameter Real E0 = 1.229;
+      parameter Real i0 = 1e-3;
+      parameter Real alpha = 0.5;
+      parameter Real R_ohmic = 0.15e-4;
+      parameter Real iL = 15000;
+      parameter Real A_cell = 0.01;
+      parameter Real n_dot_H2_in = 0.5 "H2 supply rate, mol/s";
+      Modelica.Blocks.Sources.RealExpression currentSignal(y = i);
+      Modelica.Blocks.Sources.RealExpression currentDensitySignal(y = i/A_cell);
+      PEMFuelCell.Models.HydrogenSupplySystem h2supply(N_cells = N_cells);
+      PEMFuelCell.Models.PolarizationCurveBlock polCurve(T = T, p_O2 = p_O2, p_H2O = p_H2O, E0 = E0, i0 = i0, alpha = alpha, R_ohmic = R_ohmic, iL = iL);
+    equation
+      connect(currentSignal.y, h2supply.I_stack);
+      connect(h2supply.p_H2_out, polCurve.p_H2);
+      connect(currentDensitySignal.y, polCurve.i_density);
+      v = N_cells*polCurve.V_cell;
+    end PEMStack;
+
+    model HydrogenManifold "Manifold with stoichiometric supply and pressure-regulating outlet"
+      parameter Real V_H2 = 0.01 "Manifold volume, m3";
+      Modelica.Blocks.Interfaces.RealInput T "Operating temperature, K";
+      parameter Integer N_cells = 455 "Number of cells drawing H2";
+      parameter Real lambda_H2 = 1.5 "Stoichiometric excess ratio";
+      parameter Real p_target_H2 = 151987.5 "Target manifold pressure, Pa";
+      parameter Real k_out_H2 = 2e-5 "Outlet flow coefficient, mol/(s.Pa)";
+      Modelica.Blocks.Interfaces.RealInput I "Stack current, A" annotation(
+        Placement(transformation(extent = {{-120, -10}, {-100, 10}})));
+      Real p_H2(start = 151987.5, fixed = true) "H2 partial pressure, Pa";
+      Real n_dot_H2_react "H2 consumption rate, mol/s";
+      Real n_dot_H2_in "H2 supply rate, mol/s (stoichiometric)";
+      Real n_dot_H2_out "H2 outlet/purge rate, mol/s";
+    equation
+      n_dot_H2_react = N_cells*I/(2*PEMFuelCell.Functions.F);
+      n_dot_H2_in = lambda_H2*n_dot_H2_react;
+      n_dot_H2_out = max(0, k_out_H2*(p_H2 - p_target_H2));
+      der(p_H2) = (PEMFuelCell.Functions.R*T/V_H2)*(n_dot_H2_in - n_dot_H2_react - n_dot_H2_out);
+      annotation(
+        Icon(coordinateSystem(preserveAspectRatio = false, extent = {{-100, -100}, {100, 100}}), graphics = {Rectangle(extent = {{-100, 100}, {100, -100}}, lineColor = {0, 0, 0}, fillColor = {230, 230, 230}, fillPattern = FillPattern.Solid), Text(extent = {{-90, 20}, {90, -20}}, textString = "H2 Manifold")}));
+    end HydrogenManifold;
+
+    model DiagramPEMStack
+      extends Modelica.Electrical.Analog.Interfaces.OnePort;
+      parameter Integer N_cells = 455;
+      parameter Real p_H2O = 101325;
+      parameter Real E0 = 1.04;
+      parameter Real i0 = 1e-3;
+      parameter Real alpha = 0.5;
+      parameter Real R_ohmic = 0.15e-4;
+      parameter Real iL = 15000;
+      parameter Real A_cell = 0.01;
+      Modelica.Blocks.Sources.RealExpression CurrentSignal1(y = i) annotation(
+        Placement(transformation(origin = {-88, 58}, extent = {{-10, -10}, {10, 10}})));
+      Modelica.Blocks.Sources.RealExpression CurrentDensitySignal1(y = i/A_cell) annotation(
+        Placement(transformation(origin = {-52, 78}, extent = {{-10, -10}, {10, 10}})));
+      Models.HydrogenSupplySystem hydrogenSupplySystem(N_cells = N_cells) annotation(
+        Placement(transformation(origin = {-52, 58}, extent = {{-10, -10}, {10, 10}})));
+      Models.PolarizationCurveBlock polarizationCurveBlock(p_H2O = p_H2O, E0 = E0, i0 = i0, alpha = alpha, R_ohmic = R_ohmic, iL = iL) annotation(
+        Placement(transformation(origin = {18, 28}, extent = {{-10, -10}, {10, 10}})));
+      Modelica.Blocks.Sources.RealExpression CurrentSignal11(y = i) annotation(
+        Placement(transformation(origin = {-22, 6}, extent = {{-10, -10}, {10, 10}})));
+      AirSupplySystem airSupplySystem1(N_cells = N_cells) annotation(
+        Placement(transformation(origin = {-52, 20}, extent = {{-10, -10}, {10, 10}})));
+      ThermalManagementSystem thermalManagementSystem(N_cells = N_cells, thermal(T(start = 298.15))) annotation(
+        Placement(transformation(origin = {70, 64}, extent = {{-10, -10}, {10, 10}})));
+      Modelica.Blocks.Sources.RealExpression CurrentSignal111(y = i) annotation(
+        Placement(transformation(origin = {-16, 92}, extent = {{-10, -10}, {10, 10}})));
+    equation
+      v = N_cells*polarizationCurveBlock.V_cell;
+      connect(CurrentDensitySignal1.y, polarizationCurveBlock.i_density) annotation(
+        Line(points = {{-41, 78}, {2, 78}, {2, 32}, {8, 32}}, color = {0, 0, 127}));
+      connect(hydrogenSupplySystem.p_H2_out, polarizationCurveBlock.p_H2) annotation(
+        Line(points = {{-41, 58}, {-10, 58}, {-10, 24}, {8, 24}}, color = {0, 0, 127}));
+      connect(airSupplySystem1.p_O2_out, polarizationCurveBlock.p_O2) annotation(
+        Line(points = {{-41, 20}, {8, 20}}, color = {0, 0, 127}));
+      connect(thermalManagementSystem.V_cell_in, polarizationCurveBlock.V_cell) annotation(
+        Line(points = {{59, 60}, {43.5, 60}, {43.5, 28}, {30, 28}}, color = {0, 0, 127}));
+      connect(thermalManagementSystem.I_stack, CurrentSignal111.y) annotation(
+        Line(points = {{59, 68}, {37, 68}, {37, 92}, {-5, 92}}, color = {0, 0, 127}));
+      connect(CurrentSignal1.y, hydrogenSupplySystem.I_stack) annotation(
+        Line(points = {{-76, 58}, {-63, 58}}, color = {0, 0, 127}));
+      connect(polarizationCurveBlock.T, thermalManagementSystem.T_out) annotation(
+        Line(points = {{8, 36}, {6, 36}, {6, 86}, {86, 86}, {86, 64}, {82, 64}}, color = {0, 0, 127}));
+      connect(thermalManagementSystem.T_out, airSupplySystem1.T) annotation(
+        Line(points = {{82, 64}, {86, 64}, {86, -8}, {-74, -8}, {-74, 28}, {-62, 28}}, color = {0, 0, 127}));
+      connect(airSupplySystem1.I_stack, CurrentSignal11.y) annotation(
+        Line(points = {{-62, 20}, {-72, 20}, {-72, -2}, {2, -2}, {2, 8}, {-10, 8}, {-10, 6}}, color = {0, 0, 127}));
+      connect(thermalManagementSystem.T_out, hydrogenSupplySystem.T) annotation(
+        Line(points = {{82, 64}, {86, 64}, {86, 102}, {-74, 102}, {-74, 66}, {-62, 66}}, color = {0, 0, 127}));
+      annotation(
+        Placement(transformation(origin = {-16, -20}, extent = {{-10, -10}, {10, 10}})));
+    end DiagramPEMStack;
+
+    model OxygenManifold "Manifold with stoichiometric supply and pressure-regulating outlet"
+      parameter Real V_O2 = 0.02 "Manifold volume, m3";
+      Modelica.Blocks.Interfaces.RealInput T "Operating temperature, K";
+      parameter Integer N_cells = 455 "Number of cells consuming O2";
+      parameter Real lambda_O2 = 2.0 "Stoichiometric excess ratio (typically higher for air)";
+      parameter Real p_target_O2 = 21278.25 "Target manifold pressure, Pa (0.21 x 101325)";
+      parameter Real k_out_O2 = 2e-5 "Outlet flow coefficient, mol/(s.Pa)";
+      Modelica.Blocks.Interfaces.RealInput I "Stack current, A" annotation(
+        Placement(transformation(extent = {{-120, -10}, {-100, 10}})));
+      Real p_O2(start = 21278.25, fixed = true) "O2 partial pressure, Pa";
+      Real n_dot_O2_react "O2 consumption rate, mol/s";
+      Real n_dot_O2_in "O2 supply rate, mol/s (stoichiometric)";
+      Real n_dot_O2_out "O2 outlet/purge rate, mol/s";
+    equation
+      n_dot_O2_react = N_cells*I/(4*PEMFuelCell.Functions.F);
+      n_dot_O2_in = lambda_O2*n_dot_O2_react;
+      n_dot_O2_out = max(0, k_out_O2*(p_O2 - p_target_O2));
+      der(p_O2) = (PEMFuelCell.Functions.R*T/V_O2)*(n_dot_O2_in - n_dot_O2_react - n_dot_O2_out);
+      annotation(
+        Icon(coordinateSystem(preserveAspectRatio = false, extent = {{-100, -100}, {100, 100}}), graphics = {Rectangle(extent = {{-100, 100}, {100, -100}}, lineColor = {0, 0, 0}, fillColor = {230, 230, 230}, fillPattern = FillPattern.Solid), Text(extent = {{-90, 20}, {90, -20}}, textString = "O2 Manifold")}));
+    end OxygenManifold;
+
+    model ThermalMass
+      parameter Real C_th = 40000 "Thermal capacitance, J/K";
+      parameter Real E_tn = 1.481 "Thermoneutral voltage per cell, V";
+      parameter Real epsilon = 0.8 "Heat exchanger effectiveness";
+      parameter Real m_dot_cool = 0.18 "Coolant mass flow rate, kg/s";
+      parameter Real cp_cool = 4180 "Coolant specific heat capacity, J/(kg.K)";
+      parameter Real T_cool_in = 298.15 "Coolant inlet temperature, K";
+      parameter Integer N_cells = 455 "Number of cells in stack";
+      Modelica.Blocks.Interfaces.RealInput I "Stack current, A" annotation(
+        Placement(transformation(extent = {{-120, 30}, {-100, 50}})));
+      Modelica.Blocks.Interfaces.RealInput V_cell "Cell voltage, V" annotation(
+        Placement(transformation(extent = {{-120, -50}, {-100, -30}})));
+      Real T(start = 353.15, fixed = true) "Stack temperature, K";
+      Real Q_gen "Heat generated, W";
+      Real Q_cool "Heat removed by coolant, W";
+    equation
+      Q_gen = N_cells*I*(E_tn - V_cell);
+      Q_cool = epsilon*m_dot_cool*cp_cool*(T - T_cool_in);
+      der(T) = (Q_gen - Q_cool)/C_th;
+      annotation(
+        Icon(coordinateSystem(preserveAspectRatio = false, extent = {{-100, -100}, {100, 100}}), graphics = {Rectangle(extent = {{-100, 100}, {100, -100}}, lineColor = {0, 0, 0}, fillColor = {230, 230, 230}, fillPattern = FillPattern.Solid), Text(extent = {{-90, 20}, {90, -20}}, textString = "Thermal Mass")}));
+    end ThermalMass;
+
+    package URFC
+      block PolarizationCurveBlockURFC "Sign-aware polarisation block: I>0 fuel cell mode, I<0 electrolysis mode"
+        extends Modelica.Electrical.Analog.Interfaces.OnePort;
+        parameter Real i0 = 1e-3 "Exchange current density [A/m2]";
+        parameter Real E0 = 1.229 "Standard reversible cell potential at reference state [V]";
+        parameter Real R_ohmic = 0.15e-4 "Area-specific internal/ohmic resistance [Ohm.m2]";
+        parameter Real R_conc = 1e-6 "Area-specific mass-transport/concentration resistance [Ohm.m2]";
+        Modelica.Blocks.Interfaces.RealInput T "Operating temperature [K]" annotation(
+          Placement(transformation(extent = {{-120, 70}, {-100, 90}})));
+        Modelica.Blocks.Interfaces.RealInput i_density "Signed current density [A/m2]" annotation(
+          Placement(transformation(extent = {{-120, 30}, {-100, 50}})));
+        Modelica.Blocks.Interfaces.RealInput p_H2 "Hydrogen partial pressure [Pa]" annotation(
+          Placement(transformation(extent = {{-120, -50}, {-100, -30}})));
+        Modelica.Blocks.Interfaces.RealInput p_O2 "Oxygen partial pressure [Pa]" annotation(
+          Placement(transformation(extent = {{-120, -90}, {-100, -70}})));
+        Modelica.Blocks.Interfaces.RealInput p_H2O "Water vapor partial pressure [Pa]" annotation(
+          Placement(transformation(extent = {{-120, -130}, {-100, -110}})));
+        Modelica.Blocks.Interfaces.RealOutput V_cell "Calculated cell potential [V]" annotation(
+          Placement(transformation(extent = {{100, -10}, {120, 10}})));
+        Real E_nernst "Thermodynamic Nernst potential [V]";
+        Real dV_act "Activation overpotential loss [V]";
+        Real dV_ohmic "Ohmic overpotential loss [V]";
+        Real dV_conc "Concentration/mass-transport overpotential loss [V]";
+      equation
+        E_nernst = PEMFuelCell.Functions.nernstVoltage(T, p_H2, p_O2, p_H2O, E0);
+        dV_act = PEMFuelCell.Functions.activationLossURFC(i_density, i0, T);
+        dV_ohmic = i_density*R_ohmic;
+        dV_conc = PEMFuelCell.Functions.concentrationLossLinearURFC(i_density, R_conc);
+        V_cell = E_nernst - dV_act - dV_ohmic - dV_conc;
+      end PolarizationCurveBlockURFC;
+
+      model HydrogenManifoldURFC
+        Modelica.Blocks.Interfaces.RealInput T;
+        parameter Real V_H2 = 0.005 "Hydrogen manifold volume [m3]";
+        parameter Integer N_cells = 455 "Number of cells in the URFC stack [-]";
+        parameter Real lambda_H2 = 1.5 "Hydrogen stoichiometry/excess ratio in fuel cell mode [-]";
+        parameter Real p_target_H2 = 151987.5 "Target operating pressure for hydrogen [Pa]";
+        parameter Real k_out_H2 = 2e-5 "Storage/venting valve coefficient in electrolysis mode [mol/(s.Pa)]";
+        Modelica.Blocks.Interfaces.RealInput I "Signed stack current, A";
+        Real p_H2(start = 151987.5, fixed = true) "Reaction molar flow rate";
+        Real n_dot_H2_react "Signed: positive = consumption (FC), negative = generation (EC)";
+        Real n_dot_H2_in "Supply, active only in fuel cell mode";
+        Real n_dot_H2_out "Storage/venting, active only in electrolysis mode";
+      equation
+        n_dot_H2_react = N_cells*I/(2*PEMFuelCell.Functions.F);
+        n_dot_H2_out = noEvent(max(0, k_out_H2*(p_H2 - p_target_H2)));
+        n_dot_H2_in = lambda_H2*noEvent(max(n_dot_H2_react, 0));
+        der(p_H2) = (PEMFuelCell.Functions.R*T/V_H2)*(n_dot_H2_in - n_dot_H2_react - n_dot_H2_out);
+      end HydrogenManifoldURFC;
+
+      model WaterManifoldURFC
+        parameter Real V_H2O = 0.01 "Manifold volume, m3";
+        Modelica.Blocks.Interfaces.RealInput T "Operating temperature, K";
+        parameter Integer N_cells = 455 "Number of cells";
+        parameter Real p_target_H2O = 47375 "Target manifold pressure, Pa";
+        parameter Real k_vent_H2O = 2e-5 "Venting coefficient, FC mode (removes excess product water), mol/(s.Pa)";
+        parameter Real k_supply_H2O = 2e-5 "Supply coefficient, EC mode (feeds water for electrolysis), mol/(s.Pa)";
+        Modelica.Blocks.Interfaces.RealInput I "Signed stack current, A" annotation(
+          Placement(transformation(extent = {{-120, -10}, {-100, 10}})));
+        Real p_H2O(start = 101325, fixed = true) "H2O partial pressure, Pa";
+        Real n_dot_H2O_react "Signed: negative = generation (FC), positive = consumption (EC)";
+        Real n_dot_H2O_vent "Removal of excess product water - active in FC mode";
+        Real n_dot_H2O_supply "Feed of reactant water - active in EC mode";
+      equation
+        n_dot_H2O_react = -N_cells*I/(2*PEMFuelCell.Functions.F);
+// (FC mode, product accumulating)
+        n_dot_H2O_vent = noEvent(max(0, k_vent_H2O*(p_H2O - p_target_H2O)));
+        n_dot_H2O_supply = noEvent(max(0, k_supply_H2O*(p_target_H2O - p_H2O)));
+        der(p_H2O) = (PEMFuelCell.Functions.R*T/V_H2O)*(n_dot_H2O_supply - n_dot_H2O_react - n_dot_H2O_vent);
+      end WaterManifoldURFC;
+
+      model OxygenManifoldURFC
+        parameter Real V_O2 = 0.01 "Manifold volume, m3";
+        Modelica.Blocks.Interfaces.RealInput T "Operating temperature, K";
+        parameter Integer N_cells = 455 "Number of cells";
+        parameter Real lambda_O2 = 2.0 "Stoichiometric excess ratio, fuel cell mode";
+        parameter Real p_target_O2 = 21278.25 "Target manifold pressure, Pa";
+        parameter Real k_out_O2 = 2e-5 "Outlet/storage flow coefficient, mol/(s.Pa)";
+        Modelica.Blocks.Interfaces.RealInput I "Signed stack current, A" annotation(
+          Placement(transformation(extent = {{-120, -10}, {-100, 10}})));
+        Real p_O2(start = 21278.25, fixed = true) "O2 partial pressure, Pa";
+        Real n_dot_O2_react "Signed: positive = consumption (FC), negative = generation (EC)";
+        Real n_dot_O2_in "Gas-phase supply - active only in fuel cell mode";
+        Real n_dot_O2_out "Outlet/storage flow";
+      equation
+        n_dot_O2_react = N_cells*I/(4*PEMFuelCell.Functions.F);
+        n_dot_O2_in = lambda_O2*noEvent(max(n_dot_O2_react, 0));
+        n_dot_O2_out = noEvent(max(0, k_out_O2*(p_O2 - p_target_O2)));
+        der(p_O2) = (PEMFuelCell.Functions.R*T/V_O2)*(n_dot_O2_in - n_dot_O2_react - n_dot_O2_out);
+      end OxygenManifoldURFC;
+
+      model ThermalMassURFC
+        parameter Real C_th = 40000 "Thermal capacitance, J/K";
+        parameter Real E_tn = 1.481 "Thermoneutral voltage per cell, V";
+        parameter Real epsilon = 0.8 "Heat exchanger effectiveness";
+        parameter Real m_dot_cool = 0.18 "Coolant mass flow rate, kg/s";
+        parameter Real cp_cool = 4180 "Coolant specific heat capacity, J/(kg.K)";
+        parameter Real T_cool_in = 298.15 "Coolant inlet temperature, K";
+        parameter Integer N_cells = 455 "Number of cells in stack";
+        Modelica.Blocks.Interfaces.RealInput I "Signed stack current, A" annotation(
+          Placement(transformation(extent = {{-120, 30}, {-100, 50}})));
+        Modelica.Blocks.Interfaces.RealInput V_cell "Signed cell voltage, V" annotation(
+          Placement(transformation(extent = {{-120, -50}, {-100, -30}})));
+        Real T(start = 353.15, fixed = true) "Stack temperature, K";
+        Real Q_gen "Heat generated (positive) or absorbed (negative), W";
+        Real Q_cool "Heat removed by coolant, W";
+      equation
+        Q_gen = N_cells*I*(E_tn - V_cell);
+        Q_cool = epsilon*m_dot_cool*cp_cool*(T - T_cool_in);
+        der(T) = (Q_gen - Q_cool)/C_th;
+      end ThermalMassURFC;
+
+      model BidirectionalConverterControlled
+        parameter Real L = 5e-3 "Converter energy storage filter inductance [H]";
+        parameter Real C = 5e-4 "DC bus filtering capacitance [F]";
+        parameter Real Kp = 1e-2 "Proportional gain for current control loop [1/A]";
+        parameter Real d_min = 0.01 "Lower duty cycle limit";
+        parameter Real d_max = 0.99 "Upper duty cycle limit";
+        Modelica.Electrical.Analog.Interfaces.PositivePin p annotation(
+          Placement(transformation(extent = {{-110, -10}, {-90, 10}})));
+        Modelica.Electrical.Analog.Interfaces.NegativePin n annotation(
+          Placement(transformation(extent = {{90, -10}, {110, 10}})));
+        Modelica.Electrical.Analog.Interfaces.PositivePin bus_p annotation(
+          Placement(transformation(extent = {{-10, 90}, {10, 110}})));
+        Modelica.Electrical.Analog.Interfaces.NegativePin bus_n annotation(
+          Placement(transformation(extent = {{-10, -110}, {10, -90}})));
+        Modelica.Blocks.Interfaces.RealInput I_cmd "Commanded stack current, A (signed)" annotation(
+          Placement(transformation(extent = {{-20, -20}, {20, 20}}, rotation = 90, origin = {-100, -100})));
+        Real iL(start = 0, fixed = true) "Inductor current, A";
+        Real Vstack "Stack terminal voltage, V";
+        Real Vbus(start = 600, fixed = true) "Bus voltage, V";
+        Real d(start = 0.5) "Duty cycle, controlled";
+        Real I_actual "Actual stack current, A";
+        Real error "Current tracking error";
+      protected
+        Real d_ff "Feedforward duty cycle based on terminal voltage ratio";
+      equation
+        Vstack = p.v - n.v;
+        Vbus = bus_p.v - bus_n.v;
+        p.i + n.i = 0;
+        bus_p.i + bus_n.i = 0;
+        p.i = iL;
+        I_actual = iL;
+        error = I_cmd - I_actual;
+        d_ff = 1 - max(Vstack, 1e-3)/max(Vbus, 1);
+        d = noEvent(min(max(d_ff + Kp*error, d_min), d_max));
+        L*der(iL) = Vstack - (1 - d)*Vbus;
+        C*der(Vbus) = (1 - d)*iL - bus_p.i;
+      end BidirectionalConverterControlled;
+
+      package URFCWrappers
+        block ThermalManagementSystemURFC
+          parameter Real C_th = 40000 "Total lumped stack thermal capacity [J/K]";
+          parameter Real E_tn = 1.481 "Thermoneutral cell potential [V]";
+          parameter Real epsilon = 0.8 "Heat exchanger effectiveness / thermal efficiency [-]";
+          parameter Real m_dot_cool = 0.18 "Coolant mass flow rate [kg/s]";
+          parameter Real cp_cool = 4180 "Coolant specific heat capacity [J/(kg.K)]";
+          parameter Real T_cool_in = 298.15 "Coolant fluid inlet temperature [K]";
+          parameter Integer N_cells = 455 "Number of cells in the URFC stack [-]";
+          Modelica.Blocks.Interfaces.RealInput I_stack "Signed stack current, A" annotation(
+            Placement(transformation(extent = {{-120, 30}, {-100, 50}})));
+          Modelica.Blocks.Interfaces.RealInput V_cell_in "Signed cell voltage, V" annotation(
+            Placement(transformation(extent = {{-120, -50}, {-100, -30}})));
+          Modelica.Blocks.Interfaces.RealOutput T_out "Stack temperature, K" annotation(
+            Placement(transformation(extent = {{100, -10}, {120, 10}})));
+          PEMFuelCell.Models.URFC.ThermalMassURFC thermal(C_th = C_th, E_tn = E_tn, epsilon = epsilon, m_dot_cool = m_dot_cool, cp_cool = cp_cool, T_cool_in = T_cool_in, N_cells = N_cells);
+        equation
+          connect(I_stack, thermal.I);
+          connect(V_cell_in, thermal.V_cell);
+          T_out = thermal.T;
+        end ThermalManagementSystemURFC;
+
+        block AirSupplySystemURFC
+          parameter Real V_O2 = 0.02 "Manifold volume, m3";
+          Modelica.Blocks.Interfaces.RealInput T "Operating temperature, K" annotation(
+            Placement(transformation(extent = {{-120, 70}, {-100, 90}})));
+          parameter Integer N_cells = 455 "Number of cells consuming O2";
+          parameter Real lambda_O2 = 2.0 "Stoichiometric excess ratio";
+          parameter Real p_target_O2 = 21278.25 "Target manifold pressure, Pa";
+          parameter Real k_out_O2 = 2e-5 "Outlet flow coefficient, mol/(s.Pa)";
+          Modelica.Blocks.Interfaces.RealInput I_stack "Stack current, A" annotation(
+            Placement(transformation(extent = {{-120, -10}, {-100, 10}})));
+          Modelica.Blocks.Interfaces.RealOutput p_O2_out "O2 partial pressure, Pa" annotation(
+            Placement(transformation(extent = {{100, -10}, {120, 10}})));
+          PEMFuelCell.Models.URFC.OxygenManifoldURFC manifold(V_O2 = V_O2, N_cells = N_cells, lambda_O2 = lambda_O2, p_target_O2 = p_target_O2, k_out_O2 = k_out_O2);
+        equation
+          connect(I_stack, manifold.I);
+          connect(T, manifold.T);
+          p_O2_out = manifold.p_O2;
+          annotation(
+            Icon(coordinateSystem(preserveAspectRatio = false, extent = {{-100, -100}, {100, 100}}), graphics = {Rectangle(extent = {{-100, 100}, {100, -100}}, lineColor = {0, 0, 0}, fillColor = {230, 230, 230}, fillPattern = FillPattern.Solid), Text(extent = {{-90, 20}, {90, -20}}, textString = "Air Supply")}));
+        end AirSupplySystemURFC;
+
+        block HydrogenSupplySystem
+          parameter Real V_H2 = 0.01 "Manifold volume, m3";
+          Modelica.Blocks.Interfaces.RealInput T "Operating temperature, K" annotation(
+            Placement(transformation(extent = {{-120, 70}, {-100, 90}})));
+          parameter Integer N_cells = 455 "Number of cells drawing H2";
+          parameter Real lambda_H2 = 1.5 "Stoichiometric excess ratio";
+          parameter Real p_target_H2 = 151987.5 "Target manifold pressure, Pa";
+          parameter Real k_out_H2 = 2e-5 "Outlet flow coefficient, mol/(s.Pa)";
+          Modelica.Blocks.Interfaces.RealInput I_stack "Stack current, A" annotation(
+            Placement(transformation(extent = {{-120, -10}, {-100, 10}})));
+          Modelica.Blocks.Interfaces.RealOutput p_H2_out "H2 partial pressure, Pa" annotation(
+            Placement(transformation(extent = {{100, -10}, {120, 10}})));
+          PEMFuelCell.Models.URFC.HydrogenManifoldURFC manifold(V_H2 = V_H2, N_cells = N_cells, lambda_H2 = lambda_H2, p_target_H2 = p_target_H2, k_out_H2 = k_out_H2);
+        equation
+          connect(I_stack, manifold.I);
+          connect(T, manifold.T);
+          p_H2_out = manifold.p_H2;
+          annotation(
+            Icon(coordinateSystem(preserveAspectRatio = false, extent = {{-100, -100}, {100, 100}}), graphics = {Rectangle(extent = {{-100, 100}, {100, -100}}, lineColor = {0, 0, 0}, fillColor = {230, 230, 230}, fillPattern = FillPattern.Solid), Text(extent = {{-90, 20}, {90, -20}}, textString = "H2 Supply")}));
+        end HydrogenSupplySystem;
+
+        block WaterManagementSystemURFC
+          parameter Real V_H2O = 0.01 "Manifold volume, m3";
+          parameter Integer N_cells = 455 "Number of cells";
+          parameter Real p_target_H2O = 101325 "Target manifold pressure, Pa";
+          parameter Real k_vent_H2O = 2e-5 "Venting coefficient, FC mode, mol/(s.Pa)";
+          parameter Real k_supply_H2O = 2e-5 "Supply coefficient, EC mode, mol/(s.Pa)";
+          Modelica.Blocks.Interfaces.RealInput T "Operating temperature, K" annotation(
+            Placement(transformation(extent = {{-120, 70}, {-100, 90}})));
+          Modelica.Blocks.Interfaces.RealInput I_stack "Signed stack current, A" annotation(
+            Placement(transformation(extent = {{-120, -10}, {-100, 10}})));
+          Modelica.Blocks.Interfaces.RealOutput p_H2O_out "H2O partial pressure, Pa" annotation(
+            Placement(transformation(extent = {{100, -10}, {120, 10}})));
+          PEMFuelCell.Models.URFC.WaterManifoldURFC manifold(V_H2O = V_H2O, N_cells = N_cells, p_target_H2O = p_target_H2O, k_vent_H2O = k_vent_H2O, k_supply_H2O = k_supply_H2O);
+        equation
+          connect(I_stack, manifold.I);
+          connect(T, manifold.T);
+          p_H2O_out = manifold.p_H2O;
+          annotation(
+            Icon(coordinateSystem(preserveAspectRatio = false, extent = {{-100, -100}, {100, 100}}), graphics = {Rectangle(extent = {{-100, 100}, {100, -100}}, lineColor = {0, 0, 0}, fillColor = {230, 230, 230}, fillPattern = FillPattern.Solid), Text(extent = {{-90, 20}, {90, -20}}, textString = "Water Mgmt")}));
+        end WaterManagementSystemURFC;
+      end URFCWrappers;
+
+      model DiagramURFCv2
+        Modelica.Electrical.Analog.Interfaces.PositivePin p annotation(
+          Placement(transformation(extent = {{-110, -10}, {-90, 10}})));
+        Modelica.Electrical.Analog.Interfaces.NegativePin n annotation(
+          Placement(transformation(extent = {{90, -10}, {110, 10}})));
+        parameter Integer N_cells = 455;
+        parameter Real i0 = 1e-3;
+        parameter Real alpha = 0.5;
+        parameter Real E0 = 1.229;
+        parameter Real R_ohmic = 0.15e-4;
+        parameter Real iL = 15000;
+        parameter Real A_cell = 0.01;
+        output Real I_stack(unit = "A") "Stack current (Positive = Fuel Cell, Negative = Electrolyzer)";
+        output Real V_stack(unit = "V") "Stack terminal voltage";
+        URFCWrappers.HydrogenSupplySystem H2supply annotation(
+          Placement(transformation(origin = {-34, 76}, extent = {{-10, -10}, {10, 10}})));
+        URFCWrappers.WaterManagementSystemURFC H2Osupply annotation(
+          Placement(transformation(origin = {-34, 4}, extent = {{-10, -10}, {10, 10}})));
+        URFCWrappers.AirSupplySystemURFC airSupply annotation(
+          Placement(transformation(origin = {-34, 26}, extent = {{-10, -10}, {10, 10}})));
+        URFCWrappers.ThermalManagementSystemURFC ThermalManagement annotation(
+          Placement(transformation(origin = {-36, 50}, extent = {{-10, -10}, {10, 10}})));
+        BidirectionalConverterControlled bidirectionalConverterControlled annotation(
+          Placement(transformation(origin = {-17, -39}, extent = {{-15, -15}, {15, 15}})));
+        Modelica.Blocks.Sources.RealExpression TotalCurrentSignal(y = currentSensor.i) annotation(
+          Placement(transformation(origin = {-88, 62}, extent = {{-10, -10}, {10, 10}})));
+        PEMStackOnePortURFC PEMstack(N_cells = N_cells, i0 = i0, alpha = alpha, E0 = E0, R_ohmic = R_ohmic, A_cell = A_cell) annotation(
+          Placement(transformation(origin = {34, 34}, extent = {{-10, -10}, {10, 10}})));
+        Modelica.Electrical.Analog.Sensors.CurrentSensor currentSensor annotation(
+          Placement(transformation(origin = {46, -4}, extent = {{-10, -10}, {10, 10}})));
+        Modelica.Blocks.Continuous.FirstOrder Filter1(T = 0.01, k = 1) annotation(
+          Placement(transformation(origin = {-82, 30}, extent = {{-10, -10}, {10, 10}})));
+        Modelica.Electrical.Analog.Basic.Ground internalGround annotation(
+          Placement(transformation(origin = {88, 56}, extent = {{-10, -10}, {10, 10}})));
+        Modelica.Blocks.Sources.CombiTimeTable sweepSignal(table = [0, 0; 20, -0.3; 220, 0.3]) annotation(
+          Placement(transformation(origin = {-76, -34}, extent = {{-10, -10}, {10, 10}})));
+        Modelica.Blocks.Continuous.FirstOrder Filter11(T = 0.01, k = 1) annotation(
+          Placement(transformation(origin = {42, 70}, extent = {{-10, -10}, {10, 10}})));
+      equation
+        connect(H2supply.T, ThermalManagement.T_out) annotation(
+          Line(points = {{-44, 84}, {-50, 84}, {-50, 62}, {-20, 62}, {-20, 50}, {-24, 50}}, color = {0, 0, 127}));
+        connect(ThermalManagement.T_out, airSupply.T) annotation(
+          Line(points = {{-24, 50}, {-20, 50}, {-20, 38}, {-50, 38}, {-50, 34}, {-44, 34}}, color = {0, 0, 127}));
+        connect(ThermalManagement.T_out, H2Osupply.T) annotation(
+          Line(points = {{-24, 50}, {-20, 50}, {-20, 38}, {-50, 38}, {-50, 12}, {-45, 12}}, color = {0, 0, 127}));
+        connect(PEMstack.p_O2, airSupply.p_O2_out) annotation(
+          Line(points = {{24, 26}, {-22, 26}}, color = {0, 0, 127}));
+        connect(H2Osupply.p_H2O_out, PEMstack.p_H2O) annotation(
+          Line(points = {{-22, 4}, {12, 4}, {12, 40}, {24, 40}}, color = {0, 0, 127}));
+        connect(H2supply.p_H2_out, PEMstack.p_H2) annotation(
+          Line(points = {{-22, 76}, {8, 76}, {8, 30}, {24, 30}}, color = {0, 0, 127}));
+        connect(ThermalManagement.T_out, PEMstack.T) annotation(
+          Line(points = {{-24, 50}, {20, 50}, {20, 42}, {24, 42}}, color = {0, 0, 127}));
+        connect(PEMstack.p, currentSensor.p) annotation(
+          Line(points = {{24, 34}, {18, 34}, {18, -4}, {36, -4}}, color = {0, 0, 255}));
+        connect(bidirectionalConverterControlled.bus_n, n) annotation(
+          Line(points = {{-16, -54}, {-16, -66}, {100, -66}, {100, 0}}, color = {0, 0, 255}));
+        connect(p, bidirectionalConverterControlled.bus_p) annotation(
+          Line(points = {{-100, 0}, {-60, 0}, {-60, -14}, {-16, -14}, {-16, -24}}, color = {0, 0, 255}));
+        connect(TotalCurrentSignal.y, Filter1.u) annotation(
+          Line(points = {{-77, 62}, {-66, 62}, {-66, 48}, {-102, 48}, {-102, 30}, {-94, 30}}, color = {0, 0, 127}));
+        connect(Filter1.y, H2Osupply.I_stack) annotation(
+          Line(points = {{-71, 30}, {-56, 30}, {-56, 4}, {-44, 4}}, color = {0, 0, 127}));
+        connect(Filter1.y, ThermalManagement.I_stack) annotation(
+          Line(points = {{-71, 30}, {-64, 30}, {-64, 54}, {-46, 54}}, color = {0, 0, 127}));
+        connect(Filter1.y, H2supply.I_stack) annotation(
+          Line(points = {{-71, 30}, {-64, 30}, {-64, 76}, {-44, 76}}, color = {0, 0, 127}));
+        connect(Filter1.y, airSupply.I_stack) annotation(
+          Line(points = {{-70, 30}, {-56, 30}, {-56, 26}, {-44, 26}}, color = {0, 0, 127}));
+        connect(internalGround.p, PEMstack.n) annotation(
+          Line(points = {{88, 66}, {66, 66}, {66, 34}, {44, 34}}, color = {0, 0, 255}));
+        connect(bidirectionalConverterControlled.n, PEMstack.n) annotation(
+          Line(points = {{-2, -38}, {82, -38}, {82, 34}, {44, 34}}, color = {0, 0, 255}));
+        I_stack = -PEMstack.i;
+        V_stack = PEMstack.v;
+        connect(sweepSignal.y[1], bidirectionalConverterControlled.I_cmd) annotation(
+          Line(points = {{-65, -34}, {-65, -70}, {-32, -70}, {-32, -54}}, color = {0, 0, 127}));
+        connect(PEMstack.V_cell, Filter11.u) annotation(
+          Line(points = {{46, 40}, {54, 40}, {54, 54}, {22, 54}, {22, 70}, {30, 70}}, color = {0, 0, 127}));
+        connect(Filter11.y, ThermalManagement.V_cell_in) annotation(
+          Line(points = {{54, 70}, {64, 70}, {64, 90}, {-52, 90}, {-52, 46}, {-46, 46}}, color = {0, 0, 127}));
+        connect(currentSensor.n, bidirectionalConverterControlled.p) annotation(
+          Line(points = {{56, -4}, {64, -4}, {64, -20}, {-42, -20}, {-42, -38}, {-32, -38}}, color = {0, 0, 255}));
+      end DiagramURFCv2;
+
+      model PEMStackOnePortURFC
+        extends Modelica.Electrical.Analog.Interfaces.OnePort;
+        parameter Integer N_cells = 455;
+        parameter Real A_cell = 0.03;
+        parameter Real i0 = 1e-3;
+        parameter Real alpha = 0.5;
+        parameter Real E0 = 1.229;
+        parameter Real R_ohmic = 0.15e-4;
+        parameter Real R_conc = 1e-6 "Mass-transport resistance, Ohm.m2";
+        Modelica.Blocks.Interfaces.RealInput T annotation(
+          Placement(transformation(extent = {{-120, 70}, {-100, 90}})));
+        Modelica.Blocks.Interfaces.RealInput p_H2 annotation(
+          Placement(transformation(extent = {{-120, -50}, {-100, -30}})));
+        Modelica.Blocks.Interfaces.RealInput p_O2 annotation(
+          Placement(transformation(extent = {{-120, -90}, {-100, -70}})));
+        Modelica.Blocks.Interfaces.RealInput p_H2O annotation(
+          Placement(transformation(extent = {{-120, 70}, {-100, 30}})));
+        Modelica.Blocks.Interfaces.RealOutput V_cell annotation(
+          Placement(transformation(extent = {{120, 70}, {100, 30}})));
+        Real i_density;
+        Real E_nernst;
+        Real dV_act;
+        Real dV_ohmic;
+        Real dV_conc;
+      protected
+        Real c;
+      equation
+        i_density = -i/A_cell;
+        c = PEMFuelCell.Functions.R*T/(2*PEMFuelCell.Functions.F);
+        E_nernst = PEMFuelCell.Functions.nernstVoltage(T, max(p_H2, 1e-5), max(p_O2, 1e-5), max(p_H2O, 1e-5), E0);
+        dV_act = PEMFuelCell.Functions.activationLossURFC(i_density, i0, T);
+        dV_ohmic = i_density*R_ohmic;
+        dV_conc = PEMFuelCell.Functions.concentrationLossLinearURFC(i_density, R_conc);
+        v = N_cells*(E_nernst - dV_act - dV_ohmic - dV_conc);
+        V_cell = v/N_cells;
+      end PEMStackOnePortURFC;
+
+model DiagramURFCdynamic
+  Modelica.Electrical.Analog.Interfaces.PositivePin p annotation(
+    Placement(transformation(extent = {{-110, -10}, {-90, 10}})));
+  Modelica.Electrical.Analog.Interfaces.NegativePin n annotation(
+    Placement(transformation(extent = {{90, -10}, {110, 10}})));
+  parameter Integer N_cells = 1;
+  parameter Real i0 = 1e-3;
+  parameter Real alpha = 0.5;
+  parameter Real E0 = 1.12;
+  parameter Real R_ohmic = 0.15e-4;
+  parameter Real iL = 15000;
+  parameter Real A_cell = 0.01;
+  parameter Real tau = 2 "voltage relaxation time const.";
+  output Real I_stack(unit = "A") "Stack current (Positive = Fuel Cell, Negative = Electrolyzer)";
+  output Real V_stack(unit = "V") "Stack terminal voltage";
+  URFCWrappers.HydrogenSupplySystem H2supply annotation(
+    Placement(transformation(origin = {-34, 76}, extent = {{-10, -10}, {10, 10}})));
+  URFCWrappers.WaterManagementSystemURFC H2Osupply annotation(
+    Placement(transformation(origin = {-34, 4}, extent = {{-10, -10}, {10, 10}})));
+  URFCWrappers.AirSupplySystemURFC airSupply annotation(
+    Placement(transformation(origin = {-34, 26}, extent = {{-10, -10}, {10, 10}})));
+  URFCWrappers.ThermalManagementSystemURFC ThermalManagement annotation(
+    Placement(transformation(origin = {-36, 50}, extent = {{-10, -10}, {10, 10}})));
+  Modelica.Blocks.Sources.RealExpression TotalCurrentSignal(y = currentSensor.i) annotation(
+    Placement(transformation(origin = {-88, 62}, extent = {{-10, -10}, {10, 10}})));
+  PEMStackOnePortURFCv3 PEMstack(N_cells = N_cells, i0 = i0, alpha = alpha, E0 = E0, R_ohmic = R_ohmic, A_cell = A_cell, tau = tau) annotation(
+    Placement(transformation(origin = {34, 34}, extent = {{-10, -10}, {10, 10}})));
+  Modelica.Electrical.Analog.Sensors.CurrentSensor currentSensor annotation(
+    Placement(transformation(origin = {46, -4}, extent = {{-10, -10}, {10, 10}})));
+  Modelica.Blocks.Continuous.FirstOrder Filter1(T = 0.01, k = 1) annotation(
+    Placement(transformation(origin = {-82, 30}, extent = {{-10, -10}, {10, 10}})));
+  Modelica.Electrical.Analog.Basic.Ground internalGround annotation(
+    Placement(transformation(origin = {88, 56}, extent = {{-10, -10}, {10, 10}})));
+  Modelica.Blocks.Continuous.FirstOrder Filter11(T = 0.01, k = 1) annotation(
+    Placement(transformation(origin = {42, 70}, extent = {{-10, -10}, {10, 10}})));
+  Modelica.Electrical.Analog.Basic.VariableResistor loadResistor annotation(
+    Placement(transformation(origin = {46, -56}, extent = {{-10, -10}, {10, 10}})));
+Modelica.Blocks.Sources.CombiTimeTable R_profile(table = [
+  100.0, 105.0;
+  505.0, 105.0;
+  505.0, 50.0;
+  515.0, 50.0;
+  515.0, 25.0;
+  522.0, 25.0;
+  522.0, 10.0;
+  550, 10.0
+]) annotation(
+    Placement(transformation(origin = {-10, -34}, extent = {{-10, -10}, {10, 10}})));
+equation
+  connect(H2supply.T, ThermalManagement.T_out) annotation(
+    Line(points = {{-44, 84}, {-50, 84}, {-50, 62}, {-20, 62}, {-20, 50}, {-24, 50}}, color = {0, 0, 127}));
+  connect(ThermalManagement.T_out, airSupply.T) annotation(
+    Line(points = {{-24, 50}, {-20, 50}, {-20, 38}, {-50, 38}, {-50, 34}, {-44, 34}}, color = {0, 0, 127}));
+  connect(ThermalManagement.T_out, H2Osupply.T) annotation(
+    Line(points = {{-24, 50}, {-20, 50}, {-20, 38}, {-50, 38}, {-50, 12}, {-45, 12}}, color = {0, 0, 127}));
+  connect(PEMstack.p_O2, airSupply.p_O2_out) annotation(
+    Line(points = {{24, 26}, {-22, 26}}, color = {0, 0, 127}));
+  connect(H2Osupply.p_H2O_out, PEMstack.p_H2O) annotation(
+    Line(points = {{-22, 4}, {12, 4}, {12, 40}, {24, 40}}, color = {0, 0, 127}));
+  connect(H2supply.p_H2_out, PEMstack.p_H2) annotation(
+    Line(points = {{-22, 76}, {8, 76}, {8, 30}, {24, 30}}, color = {0, 0, 127}));
+  connect(ThermalManagement.T_out, PEMstack.T) annotation(
+    Line(points = {{-24, 50}, {20, 50}, {20, 42}, {24, 42}}, color = {0, 0, 127}));
+  connect(PEMstack.p, currentSensor.p) annotation(
+    Line(points = {{24, 34}, {18, 34}, {18, -4}, {36, -4}}, color = {0, 0, 255}));
+  connect(TotalCurrentSignal.y, Filter1.u) annotation(
+    Line(points = {{-77, 62}, {-66, 62}, {-66, 48}, {-102, 48}, {-102, 30}, {-94, 30}}, color = {0, 0, 127}));
+  connect(Filter1.y, H2Osupply.I_stack) annotation(
+    Line(points = {{-71, 30}, {-56, 30}, {-56, 4}, {-44, 4}}, color = {0, 0, 127}));
+  connect(Filter1.y, ThermalManagement.I_stack) annotation(
+    Line(points = {{-71, 30}, {-64, 30}, {-64, 54}, {-46, 54}}, color = {0, 0, 127}));
+  connect(Filter1.y, H2supply.I_stack) annotation(
+    Line(points = {{-71, 30}, {-64, 30}, {-64, 76}, {-44, 76}}, color = {0, 0, 127}));
+  connect(Filter1.y, airSupply.I_stack) annotation(
+    Line(points = {{-70, 30}, {-56, 30}, {-56, 26}, {-44, 26}}, color = {0, 0, 127}));
+  connect(internalGround.p, PEMstack.n) annotation(
+    Line(points = {{88, 66}, {66, 66}, {66, 34}, {44, 34}}, color = {0, 0, 255}));
+  I_stack = -PEMstack.i;
+  V_stack = PEMstack.v;
+  connect(PEMstack.V_cell, Filter11.u) annotation(
+    Line(points = {{46, 40}, {54, 40}, {54, 54}, {22, 54}, {22, 70}, {30, 70}}, color = {0, 0, 127}));
+  connect(Filter11.y, ThermalManagement.V_cell_in) annotation(
+    Line(points = {{54, 70}, {64, 70}, {64, 90}, {-52, 90}, {-52, 46}, {-46, 46}}, color = {0, 0, 127}));
+  connect(currentSensor.n, loadResistor.p) annotation(
+    Line(points = {{56, -4}, {64, -4}, {64, -18}, {16, -18}, {16, -56}, {36, -56}}, color = {0, 0, 255}));
+  connect(loadResistor.n, PEMstack.n) annotation(
+    Line(points = {{56, -56}, {92, -56}, {92, 34}, {44, 34}}, color = {0, 0, 255}));
+  connect(p, loadResistor.p) annotation(
+    Line(points = {{-100, 0}, {-54, 0}, {-54, -56}, {36, -56}}, color = {0, 0, 255}));
+  connect(loadResistor.n, n) annotation(
+    Line(points = {{56, -56}, {92, -56}, {92, 0}, {100, 0}}, color = {0, 0, 255}));
+connect(R_profile.y[1], loadResistor.R) annotation(
+    Line(points = {{2, -34}, {46, -34}, {46, -44}}, color = {0, 0, 127}));
+  annotation(
+    Placement(transformation(origin = {-14, -30}, extent = {{-10, -10}, {10, 10}})));
+end DiagramURFCdynamic;
+
+      model PEMStackOnePortURFCv3
+        extends Modelica.Electrical.Analog.Interfaces.OnePort;
+        parameter Integer N_cells = 455;
+        parameter Real A_cell = 0.03;
+        parameter Real i0 = 1e-3;
+        parameter Real alpha = 0.5;
+        parameter Real E0 = 1.12;
+        parameter Real R_ohmic = 0.15e-4;
+        parameter Real R_conc = 1e-6 "Mass-transport resistance, Ohm.m2";
+        parameter Real tau = 2 "Voltage relaxation time constant, s";
+        Modelica.Blocks.Interfaces.RealInput T annotation(
+          Placement(transformation(extent = {{-120, 70}, {-100, 90}})));
+        Modelica.Blocks.Interfaces.RealInput p_H2 annotation(
+          Placement(transformation(extent = {{-120, -50}, {-100, -30}})));
+        Modelica.Blocks.Interfaces.RealInput p_O2 annotation(
+          Placement(transformation(extent = {{-120, -90}, {-100, -70}})));
+        Modelica.Blocks.Interfaces.RealInput p_H2O annotation(
+          Placement(transformation(extent = {{-120, 70}, {-100, 30}})));
+        Modelica.Blocks.Interfaces.RealOutput V_cell annotation(
+          Placement(transformation(extent = {{120, 70}, {100, 30}})));
+        Real i_density;
+        Real E_nernst;
+        Real dV_act;
+        Real dV_ohmic;
+        Real dV_conc;
+        Real V_cell_static "Instantaneous (algebraic) per-cell voltage, V";
+      protected
+        Real c;
+      equation
+        i_density = -i/A_cell;
+        c = PEMFuelCell.Functions.R*T/(2*PEMFuelCell.Functions.F);
+        E_nernst = PEMFuelCell.Functions.nernstVoltage(T, max(p_H2, 1e-5), max(p_O2, 1e-5), max(p_H2O, 1e-5), E0);
+        dV_act = PEMFuelCell.Functions.activationLossURFC(i_density, i0, T);
+        dV_ohmic = i_density*R_ohmic;
+        dV_conc = PEMFuelCell.Functions.concentrationLossLinearURFC(i_density, R_conc);
+        V_cell_static = E_nernst - dV_act - dV_ohmic - dV_conc;
+        tau*der(V_cell) = V_cell_static - V_cell;
+        v = N_cells*V_cell;
+      end PEMStackOnePortURFCv3;
+
+model URFC_FMU
+
+  parameter Integer N_cells = 1;
+  parameter Real A_cell = 0.01 "Active cell area, m2";
+  parameter Real i0 = 1e-3 "Exchange current density, A/m2";
+  parameter Real alpha = 0.5;
+  parameter Real E0 = 1.12 "Reference reversible potential, V";
+  parameter Real R_ohmic = 0.15e-4 "Ohm.m2";
+  parameter Real R_conc = 1e-6 "Mass-transport resistance, Ohm.m2";
+  parameter Real tau = 2 "Voltage relaxation time constant, s";
+  parameter Real T_cool_in = 298.15 "Coolant inlet temperature, K";
+  parameter Real V_cell_start = 1.1 "Initial cell voltage, V";
+
+  Modelica.Blocks.Interfaces.RealInput I_cmd "Signed stack current, A (+ fuel cell, - electrolysis)";
+  Modelica.Blocks.Interfaces.RealOutput V_stack "Stack terminal voltage, V";
+  Modelica.Blocks.Interfaces.RealOutput I_stack "Stack current, A (+ fuel cell, - electrolysis)";
+  Modelica.Blocks.Interfaces.RealOutput T_stack "Stack temperature, K";
+  Modelica.Blocks.Interfaces.RealOutput p_H2 "H2 manifold pressure, Pa";
+  Modelica.Blocks.Interfaces.RealOutput p_O2 "O2 manifold pressure, Pa";
+  Modelica.Blocks.Interfaces.RealOutput p_H2O "H2O manifold pressure, Pa";
+  Modelica.Blocks.Interfaces.RealOutput V_cell "Dynamic cell voltage, V";
+  Modelica.Blocks.Interfaces.RealOutput V_cell_static "Static (algebraic) cell voltage, V";
+
+
+  PEMFuelCell.Models.URFC.URFCWrappers.HydrogenSupplySystem H2supply(N_cells = N_cells);
+  PEMFuelCell.Models.URFC.URFCWrappers.WaterManagementSystemURFC H2Osupply(N_cells = N_cells);
+  PEMFuelCell.Models.URFC.URFCWrappers.AirSupplySystemURFC airSupply(N_cells = N_cells);
+  PEMFuelCell.Models.URFC.URFCWrappers.ThermalManagementSystemURFC ThermalManagement(N_cells = N_cells, T_cool_in = T_cool_in);
+  PEMFuelCell.Models.URFC.PEMStackOnePortURFCv3 PEMstack(N_cells = N_cells, A_cell = A_cell, i0 = i0, alpha = alpha, E0 = E0, R_ohmic = R_ohmic, R_conc = R_conc, tau = tau, V_cell(start = V_cell_start, fixed = true));
+  Modelica.Blocks.Continuous.FirstOrder Filter1(T = 0.01, k = 1, initType = Modelica.Blocks.Types.Init.InitialOutput, y_start = 0) "Current filter";
+  Modelica.Blocks.Continuous.FirstOrder Filter11(T = 0.01, k = 1, initType = Modelica.Blocks.Types.Init.InitialOutput, y_start = V_cell_start) "Voltage filter";
+
+ 
+  Modelica.Electrical.Analog.Sources.SignalCurrent currentDrive;
+  Modelica.Electrical.Analog.Basic.Ground ground;
+equation
+  
+  connect(I_cmd, currentDrive.i);
+  connect(currentDrive.p, PEMstack.p);
+  connect(currentDrive.n, PEMstack.n);
+  connect(PEMstack.n, ground.p);
+
+  Filter1.u = -PEMstack.i;
+  Filter11.u = PEMstack.V_cell;
+
+  connect(ThermalManagement.T_out, H2supply.T);
+  connect(ThermalManagement.T_out, airSupply.T);
+  connect(ThermalManagement.T_out, H2Osupply.T);
+  connect(ThermalManagement.T_out, PEMstack.T);
+
+
+  connect(Filter1.y, H2supply.I_stack);
+  connect(Filter1.y, airSupply.I_stack);
+  connect(Filter1.y, H2Osupply.I_stack);
+  connect(Filter1.y, ThermalManagement.I_stack);
+
+  connect(Filter11.y, ThermalManagement.V_cell_in);
+
+connect(H2supply.p_H2_out, PEMstack.p_H2);
+  connect(airSupply.p_O2_out, PEMstack.p_O2);
+  connect(H2Osupply.p_H2O_out, PEMstack.p_H2O);
+
+
+  V_stack = PEMstack.v;
+  I_stack = -PEMstack.i;
+  T_stack = ThermalManagement.T_out;
+  p_H2 = H2supply.p_H2_out;
+  p_O2 = airSupply.p_O2_out;
+  p_H2O = H2Osupply.p_H2O_out;
+  V_cell = PEMstack.V_cell;
+  V_cell_static = PEMstack.V_cell_static;
+  annotation(
+    Icon(coordinateSystem(preserveAspectRatio = false, extent = {{-100, -100}, {100, 100}}), graphics = {Rectangle(extent = {{-100, 100}, {100, -100}}, lineColor = {0, 0, 0}, fillColor = {230, 230, 230}, fillPattern = FillPattern.Solid), Text(extent = {{-90, 20}, {90, -20}}, textString = "URFC FMU")}));
+end URFC_FMU;
+    end URFC;
+  end Models;
+
+  package Tests
+    model TestPolarizationBlock
+      PEMFuelCell.Models.PolarizationCurveBlock cell(p_H2 = 151987.5);
+      Modelica.Blocks.Sources.Ramp currentRamp(height = 14800, duration = 100, offset = 10, startTime = 0);
+      Modelica.Blocks.Sources.Constant Tsrc(k = 353.15);
+      Modelica.Blocks.Sources.Constant pO2src(k = 101325);
+    equation
+      connect(currentRamp.y, cell.i_density);
+      connect(Tsrc.y, cell.T);
+      connect(pO2src.y, cell.p_O2);
+    end TestPolarizationBlock;
+
+    model TestPEMCell
+      PEMFuelCell.Models.PEMCell cell(A_cell = 0.01);
+      Modelica.Electrical.Analog.Sources.RampCurrent loadSweep(I = 140, duration = 100, offset = 0.01);
+      Modelica.Electrical.Analog.Basic.Ground ground;
+    equation
+      connect(loadSweep.p, cell.n);
+      connect(cell.p, loadSweep.n);
+      connect(cell.p, ground.p);
+    end TestPEMCell;
+
+    model TestPEMStackH2
+      PEMFuelCell.Models.PEMStack stack(A_cell = 0.003, N_cells = 1);
+      Modelica.Electrical.Analog.Sources.RampCurrent loadSweep(I = 0.3, duration = 200, offset = 0.0);
+      Modelica.Electrical.Analog.Basic.Ground ground;
+    equation
+      connect(loadSweep.p, stack.n);
+      connect(stack.p, loadSweep.n);
+      connect(stack.p, ground.p);
+    end TestPEMStackH2;
+
+    model TestDiagramURFCv2
+      PEMFuelCell.Models.URFC.DiagramURFCv2 stack(A_cell = 0.01, N_cells = 455);
+      Modelica.Electrical.Analog.Sources.ConstantVoltage dcBus(V = 1200);
+      Modelica.Electrical.Analog.Basic.Ground ground;
+      // 1. Electrical Performance
+      output Real V_stack(unit = "V") = stack.V_stack "Total stack terminal voltage";
+      output Real I_stack(unit = "A") = stack.I_stack "Total stack current";
+      // 2. Voltage Loss Breakdown (Cell Level)
+      output Real E_nernst(unit = "V") = stack.PEMstack.E_nernst "Reversible Nernst potential";
+      output Real dV_act(unit = "V") = stack.PEMstack.dV_act "Activation overpotential";
+      output Real dV_ohmic(unit = "V") = stack.PEMstack.dV_ohmic "Ohmic voltage loss";
+      output Real dV_conc(unit = "V") = stack.PEMstack.dV_conc "Concentration loss";
+      // 3. Partial Pressures
+      output Real p_H2(unit = "Pa") = stack.H2supply.manifold.p_H2 "H2 partial pressure";
+      output Real p_O2(unit = "Pa") = stack.airSupply.manifold.p_O2 "O2 partial pressure";
+      output Real p_H2O(unit = "Pa") = stack.H2Osupply.manifold.p_H2O "H2O partial pressure";
+    equation
+      connect(stack.p, dcBus.p);
+      connect(dcBus.n, stack.n);
+      connect(stack.n, ground.p);
+    end TestDiagramURFCv2;
+
+    model TestThermalMass
+      PEMFuelCell.Models.ThermalMass thermal;
+      Modelica.Blocks.Sources.Constant current(k = 100 "A");
+      Modelica.Blocks.Sources.Constant voltage(k = 0.7 "V per cell, typical loaded value");
+    equation
+      thermal.I = current.y;
+      thermal.V_cell = voltage.y;
+    end TestThermalMass;
+
+    model TestDiagramURFCdynamic
+      // 1. System Under Test
+      PEMFuelCell.Models.URFC.DiagramURFCdynamic urfc(N_cells = 1, tau = 2.0) annotation(
+        Placement(transformation(origin = {0, 0}, extent = {{-20, -20}, {20, 20}})));
+      // 2. Output Signals for Plotting (Matches the 3 figure panels)
+      output Real V_model(unit = "V") = urfc.V_stack "Top Panel: Dynamic cell output voltage";
+      output Real I_stack(unit = "A") = urfc.I_stack "Stack response current";
+      output Real R_load(unit = "Ohm") = urfc.loadResistor.R "Bottom Panel: Stepped load resistance";
+      output Real V_diff(unit = "V") "Middle Panel: Dynamic relaxation voltage offset";
+    protected
+      // Quasi-static reference tracker for calculating dynamic delay difference
+      Modelica.Blocks.Continuous.FirstOrder staticTracker(T = urfc.tau) annotation(
+        Placement(transformation(origin = {40, 20}, extent = {{-10, -10}, {10, 10}})));
+    equation
+    // Compute transient difference (Static state vs. Dynamic relaxed state)
+      staticTracker.u = urfc.PEMstack.V_cell;
+      V_diff = urfc.PEMstack.V_cell - staticTracker.y;
+    // Experiment Configuration (0 to 35 seconds)
+      annotation(
+        experiment(StopTime = 35.0, Interval = 0.01, Tolerance = 1e-6),
+        Documentation(info = "<html>
+          <p>Simulates the dynamic response of a single-cell URFC stack subject to step changes in load resistance.</p>
+        </html>"));
+    end TestDiagramURFCdynamic;
+
+    model TestURFC_FMU
+      PEMFuelCell.Models.URFC.URFC_FMU urfc(N_cells = 1);
+    
+      Modelica.Blocks.Sources.CombiTimeTable I_profile(
+        table = [0, 0; 10, 0.2; 100, 0.2; 110, -0.35; 400, -0.35],
+        smoothness = Modelica.Blocks.Types.Smoothness.LinearSegments)
+        "Signed current profile, A (+ fuel cell, - electrolysis)";
+    
+      output Real V_stack(unit = "V") = urfc.V_stack "Stack terminal voltage";
+      output Real I_stack(unit = "A") = urfc.I_stack "Stack current";
+      output Real T_stack(unit = "K") = urfc.T_stack "Stack temperature";
+      output Real V_diff(unit = "V") = urfc.V_cell - urfc.V_cell_static "Dynamic minus static cell voltage";
+    equation
+      connect(I_profile.y[1], urfc.I_cmd);
+      annotation(
+        experiment(StartTime = 0, StopTime = 400, Interval = 0.1, Tolerance = 1e-6));
+    end TestURFC_FMU;
+  end Tests;
+  annotation(
+    uses(Modelica(version = "4.1.0")));
+end PEMFuelCell;
