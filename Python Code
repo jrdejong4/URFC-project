@@ -1,1 +1,952 @@
 
+from fmpy import read_model_description, simulate_fmu
+import matplotlib.pyplot as plt
+import pandas as pd
+import io
+import os
+import requests
+
+#figure 5.1
+fmu_path = r"C:/Users/jaspe/AppData/Local/Temp/OpenModelica/OMEdit/TestDiagramPEMStack.fmu"
+
+# Inspect available variables first - useful the first time
+model_description = read_model_description(fmu_path)
+for variable in model_description.modelVariables:
+    print(variable.name, variable.causality, variable.variability)
+
+# Run the simulation
+result = simulate_fmu(
+    fmu_path,
+    start_time=0.0,
+    stop_time=500.0,
+    output=['stack.v', 'stack.i', 'stack.hydrogenSupplySystem.manifold.p_H2',
+            'stack.airSupplySystem1.manifold.p_O2',
+            'stack.thermalManagementSystem.T_out']
+)
+
+plt.plot(result['stack.i'], result['stack.v'])
+plt.xlabel('Stack Current (I)')
+plt.ylabel('Stack Voltage (V)')
+plt.show()
+plt.plot(result['time'], result['stack.thermalManagementSystem.T_out'])
+plt.xlabel('time (s)')
+plt.ylabel('Stack Voltage (V)')
+plt.show()
+
+
+fmu_path = "C:/FMU_export/FMU_export3.fmu"  
+
+results = simulate_fmu(
+    fmu_path,
+    fmi_type='ModelExchange',  
+    start_time=0.0,
+    stop_time=220.0,
+    output_interval=0.1
+)
+
+df = pd.DataFrame(results)
+
+# Filter out setup transients (t < 20s)
+df = df[df['time'] >= 20.0].copy()
+time = df['time']
+
+def get_signal(name):
+    for col in df.columns:
+        if name.lower() in col.lower():
+            return df[col]
+    raise KeyError(f"Could not find variable containing '{name}'. Available columns: {list(df.columns)}")
+
+# Extract required variables
+v_stack = get_signal('V_stack')
+i_stack = get_signal('I_stack')
+
+e_nernst = get_signal('E_nernst')
+dv_act = get_signal('dV_act')
+dv_ohmic = get_signal('dV_ohmic')
+dv_conc = get_signal('dV_conc')
+
+p_h2 = get_signal('p_H2') / 1000.0   # Convert Pa -> kPa
+p_o2 = get_signal('p_O2') / 1000.0
+p_h2o = get_signal('p_H2O') / 1000.0
+
+plt.rcParams.update({'font.size': 10, 'axes.grid': True})
+
+plt.figure(figsize=(8, 5))
+
+# Plot V-I curve (fig 5.2)
+plt.plot(i_stack, v_stack, color='#1f77b4', linewidth=2.5, label='Polarization Curve ($V$-$I$)')
+
+
+plt.axvline(0, color='gray', linestyle='--', alpha=0.8, label='Zero Current Boundary ($I = 0\mathrm{A}$)')
+
+# Labels and Title
+plt.xlabel('Stack Current [A]', fontweight='bold')
+plt.ylabel('Stack Voltage [V]', fontweight='bold')
+plt.title(r'Plot 1: Polarization Curve ($V_{stack}$ vs $I_{stack}$, $t \geq 20\mathrm{s}$)', fontweight='bold')
+
+plt.text(0.75, 0.5, r'Fuel Cell Mode' '\n' r'($I > 0\mathrm{A}$)',
+         transform=plt.gca().transAxes, fontsize=10, ha='center', va='center',
+         bbox=dict(boxstyle='round', facecolor='whitesmoke', alpha=0.8))
+
+
+plt.text(0.25, 0.5, r'Electrolyzer Mode' '\n' r'($I < 0\mathrm{A}$)',
+         transform=plt.gca().transAxes, fontsize=10, ha='center', va='center',
+         bbox=dict(boxstyle='round', facecolor='whitesmoke', alpha=0.8))
+
+plt.legend(loc='best')
+plt.tight_layout()
+plt.savefig("Plot1_Polarization_Curve.png", dpi=300)
+plt.show()
+
+#plot 5.3
+plt.figure(figsize=(8, 4.5))
+plt.plot(time, e_nernst, label='Nernst Voltage ($E_{nernst}$)', color='#9467bd', linewidth=2)
+plt.plot(time, dv_act, label='Activation Loss ($\Delta V_{act}$)', color='#d62728', linewidth=2)
+plt.plot(time, dv_ohmic, label='Ohmic Loss ($\Delta V_{ohmic}$)', color='#2ca02c', linewidth=2)
+plt.plot(time, dv_conc, label='Concentration Loss ($\Delta V_{conc}$)', color='#1f77b4', linewidth=2)
+plt.axhline(0, color='black', linestyle='--', linewidth=0.8, alpha=0.7)
+
+plt.xlabel('Time (s)', fontweight='bold')
+plt.ylabel('Voltage / Overpotential [V]', fontweight='bold')
+plt.title('Plot 2: Single Cell Voltage Loss Breakdown ($t \geq 20\mathrm{s}$)', fontweight='bold')
+plt.legend(loc='center right')
+plt.tight_layout()
+plt.savefig("Plot2_Losses_FMU.png", dpi=300)
+plt.show()
+
+#plot 5.4
+plt.figure(figsize=(8, 4.5))
+plt.plot(time, p_h2, label='$p_{\mathrm{H2}}$', color='#1f77b4', linewidth=2)
+plt.plot(time, p_o2, label='$p_{\mathrm{O2}}$', color='#ff7f0e', linewidth=2)
+plt.plot(time, p_h2o, label='$p_{\mathrm{H2O}}$', color='#2ca02c', linewidth=2)
+
+plt.xlabel('Time (s)', fontweight='bold')
+plt.ylabel('Partial Pressure [kPa]', fontweight='bold')
+plt.title('Plot 3: Gas & Water Manifold Dynamics ($t \geq 20\mathrm{s}$)', fontweight='bold')
+plt.legend()
+plt.tight_layout()
+plt.savefig("Plot3_Pressures_FMU.png", dpi=300)
+plt.show()
+
+#plot 5.7
+
+# Load Data
+local_file = r"C:\Users\jaspe\OneDrive\Documenten\thesis documentatie\PEMFuelCell.Tests.TestDiagramURFCdynamic\TestDiagramURFCdynamic_res.csv"
+github_raw_url = "https://raw.githubusercontent.com/AstroDravinec/Bachelor_Research_Project/main/Raw_Data/Model_Validation/11062026_ocv_comparison_1_and_slow_slope.csv"
+
+df_local = pd.read_csv(local_file)
+df_github = pd.read_csv(github_raw_url)
+
+df_local.columns = df_local.columns.str.strip()
+df_github.columns = df_github.columns.str.strip()
+
+
+def find_column(df, candidates):
+    for name in candidates:
+        for col in df.columns:
+            if name.lower() in col.lower():
+                return col
+    return None
+
+
+time_local = find_column(df_local, ["time"])
+time_gh = find_column(df_github, ["time"])
+v_local = find_column(df_local, ["V_model"])
+v_gh = find_column(df_github, ["Real_V"])
+res_col = find_column(df_local, ["R_load"])
+
+# Fail early with a readable message if a column wasn't found
+for name, val in [("time_local", time_local), ("time_gh", time_gh),
+                  ("v_local", v_local), ("v_gh", v_gh)]:
+    if val is None:
+        raise ValueError(f"Column for {name} not found.\n"
+                         f"Local columns: {list(df_local.columns)}\n"
+                         f"GitHub columns: {list(df_github.columns)}")
+T0, WINDOW = 500, 32
+df_local_filtered = df_local[
+    (df_local[time_local] >= T0) & (df_local[time_local] <= T0 + WINDOW)
+].copy()
+df_local_filtered["Time_Aligned"] = df_local_filtered[time_local] - T0
+
+df_gh_filtered = df_github[
+    (df_github[time_gh] >= 0) & (df_github[time_gh] <= WINDOW)
+].copy()
+
+# Difference 
+df_merged = pd.merge_asof(
+    df_local_filtered.sort_values("Time_Aligned"),
+    df_gh_filtered.sort_values(time_gh)[[time_gh, v_gh]],
+    left_on="Time_Aligned",
+    right_on=time_gh,
+    direction="nearest",
+    suffixes=("", "_gh"),
+)
+v_gh_m = v_gh if v_gh != v_local else v_gh + "_gh"
+df_merged["Difference"] = df_merged[v_local] - df_merged[v_gh_m]
+
+#. Plot
+fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 7), sharex=True)
+
+ax1.plot(df_local_filtered["Time_Aligned"], df_local_filtered[v_local],
+         color="#1f77b4", label="Model")
+ax1.plot(df_gh_filtered[time_gh], df_gh_filtered[v_gh], "--",
+         color="#ff7f0e", label="FC Reference")
+ax1.set_ylabel("Voltage (V)")
+ax1.legend(loc="upper right")
+
+ax2.plot(df_merged["Time_Aligned"], df_merged["Difference"],
+         color="red", label="Difference")
+ax2.set_ylabel("Voltage (V)")
+ax2.legend(loc="upper right")
+
+if res_col:
+    ax3.plot(df_local_filtered["Time_Aligned"], df_local_filtered[res_col],
+             "--", color="green", label="Resistance")
+    ax3.set_ylabel(r"Resistance ($\Omega$)")
+    ax3.legend(loc="upper right")
+
+ax3.set_xlabel("Time (s)")
+plt.tight_layout()
+plt.show()
+#plot 5.8
+SIM_CSV_CANDIDATES = [
+    r"C:\Users\jaspe\OneDrive\Documenten\thesis documentatie\PEMFuelCell.Tests.TestDiagramURFCelectrolysis\TestDiagramURFCelectrolysis_res.csv",
+    "TestDiagramURFCelectrolysis_res.csv",
+]
+
+RUN_NAMES = [f"GasRun{i}.csv" for i in range(1, 6)]
+GASRUN_URL_TEMPLATE = (
+    "https://raw.githubusercontent.com/floorzagwijn/pem-fuelcell-thesis/"
+    "main/data_raw/electrolysis_gas/{name}"
+)
+GASRUN_LOCAL_DIRS = [".", os.path.join("data_raw", "electrolysis_gas")]
+
+ONSET_THRESHOLD_A = 0.05  # thesis convention: onset = first |I| > 50 mA
+COMMON_DT = 0.5            # s, resampling step for averaging across runs
+
+def find_file(name, dirs):
+    for d in dirs:
+        path = os.path.join(d, name)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def load_sim_csv():
+    path = next((p for p in SIM_CSV_CANDIDATES if os.path.isfile(p)), None)
+    if path is None:
+        raise FileNotFoundError(
+            "Simulation result CSV not found. Checked: " + ", ".join(SIM_CSV_CANDIDATES)
+        )
+    df = pd.read_csv(path)
+
+    def pick(df, keywords):
+        for col in df.columns:
+            lc = col.lower()
+            if all(k in lc for k in keywords):
+                return col
+        return None
+
+    time_col = pick(df, ["time"]) or df.columns[0]
+    v_col = pick(df, ["v_model"]) or pick(df, ["v_stack"]) or pick(df, ["v_cell"])
+    i_col = pick(df, ["i_stack"]) or pick(df, ["current"])
+
+    if v_col is None or i_col is None:
+        raise KeyError(
+            f"Could not find voltage/current columns in sim CSV. "
+            f"Available columns: {list(df.columns)}"
+        )
+
+    sim = pd.DataFrame({
+        "time": df[time_col].astype(float),
+        "voltage": df[v_col].astype(float),
+        "current": df[i_col].astype(float),
+    })
+    return sim
+
+def load_one_gasrun(name):
+    path = find_file(name, GASRUN_LOCAL_DIRS)
+    if path is not None:
+        df = pd.read_csv(path)
+    else:
+        tmp_path = f"{name}_downloaded.csv"
+        url = GASRUN_URL_TEMPLATE.format(name=name)
+        urllib.request.urlretrieve(url, tmp_path)
+        df = pd.read_csv(tmp_path)
+
+    df = df.rename(columns={"Voltage": "voltage", "Current": "current", "Time": "time"})
+    return df[["time", "voltage", "current"]].astype(float)
+
+
+def align_to_onset(df, threshold=ONSET_THRESHOLD_A):
+    above = df.index[df["current"].abs() > threshold]
+    if len(above) == 0:
+        return df
+    t0 = df.loc[above[0], "time"]
+    out = df.copy()
+    out["time"] = out["time"] - t0
+    return out[out["time"] >= 0].reset_index(drop=True)
+
+
+def average_runs(runs, dt=COMMON_DT):
+    """Resample each aligned run onto a common grid and average."""
+    t_max = min(r["time"].max() for r in runs)
+    t_grid = np.arange(0, t_max, dt)
+
+    v_stack = np.full((len(runs), len(t_grid)), np.nan)
+    i_stack = np.full((len(runs), len(t_grid)), np.nan)
+
+    for k, r in enumerate(runs):
+        v_stack[k] = np.interp(t_grid, r["time"], r["voltage"])
+        i_stack[k] = np.interp(t_grid, r["time"], r["current"])
+
+    avg = pd.DataFrame({
+        "time": t_grid,
+        "voltage": np.nanmean(v_stack, axis=0),
+        "current": np.nanmean(i_stack, axis=0),
+    })
+    return avg
+
+def main():
+    sim = align_to_onset(load_sim_csv())
+
+    runs = [align_to_onset(load_one_gasrun(name)) for name in RUN_NAMES]
+    ref = average_runs(runs)
+    t_max = min(sim["time"].max(), ref["time"].max())
+    sim = sim[sim["time"] <= t_max]
+    ref = ref[ref["time"] <= t_max]
+
+    v_model_interp = np.interp(ref["time"], sim["time"], sim["voltage"])
+    v_diff = v_model_interp - ref["voltage"]
+
+    fig, axes = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
+
+    ax1 = axes[0]
+    ax1.plot(ref["time"], ref["voltage"], label="Real (mean of 5 runs)", color="tab:blue")
+    ax1.plot(sim["time"], sim["voltage"], label="Model", color="tab:orange")
+    ax1.set_ylabel("Cell voltage (V)")
+    ax1.legend()
+    ax1.set_title("Electrolysis voltage: model vs. reference (5-run average, Figure 14 comparison)")
+
+    ax2 = axes[1]
+    ax2.plot(ref["time"], v_diff, color="tab:red", label=r"$\Delta V = V_{model} - V_{real}$")
+    ax2.axhline(0, color="black", linewidth=0.8)
+    ax2.set_ylabel(r"$\Delta V$ (V)")
+    ax2.legend()
+
+    ax3 = axes[2]
+    ax3.plot(ref["time"], ref["current"], label="Real (mean of 5 runs)", color="tab:blue")
+    ax3.plot(sim["time"], -sim["current"], label="Model", color="tab:orange")
+    ax3.set_xlabel("Time from electrolysis onset (s)")
+    ax3.set_ylabel("Current (A)")
+    ax3.legend()
+
+    plt.tight_layout()
+    plt.savefig("electrolysis_comparison.png", dpi=200)
+    plt.show(
+if __name__ == "__main__":
+    main()
+
+#plot 5.12
+OM_CSV  = r"C:\Users\jaspe\OneDrive\Documenten\thesis documentatie\PEMFuelCell.Tests.TestURFC_FMU\TestURFC_FMU_res.csv"
+SIM_CSV = r"C:\Users\jaspe\Downloads\Simulink_res.csv"
+T_SKIP_VI = 10.0
+
+om  = pd.read_csv(OM_CSV).drop_duplicates(subset="time", keep="last")
+sim = pd.read_csv(SIM_CSV).drop_duplicates(subset="time", keep="last")
+
+om_cols = {"V_cell": "urfc.V_cell", "V_cell_static": "urfc.V_cell_static",
+           "V_stack": "V_stack", "I_stack": "I_stack"}
+
+t = np.arange(0, 400.0001, 0.05)                 
+def om_sig(n):  return np.interp(t, om["time"],  om[om_cols[n]])
+def sim_sig(n): return np.interp(t, sim["time"], sim[n])
+#a
+fig1, ax = plt.subplots(figsize=(8, 4.5))
+ax.plot(t, om_sig("V_cell"),         "k",  lw=1.8, label="V_cell dynamic (OpenModelica)")
+ax.plot(t, sim_sig("V_cell"),        "r--",lw=1.2, label="V_cell dynamic (Simulink FMU)")
+ax.plot(t, om_sig("V_cell_static"),  color="tab:gray", lw=1.8, label="V_cell static (OpenModelica)")
+ax.plot(t, sim_sig("V_cell_static"), "b:", lw=1.5, label="V_cell static (Simulink FMU)")
+ax.set(xlim=(95, 135), xlabel="time (s)", ylabel="V",
+       title="Fuel cell to electrolysis transition: OpenModelica vs Simulink FMU")
+ax.grid(alpha=0.3); ax.legend(fontsize=8)
+fig1.tight_layout(); fig1.savefig("align_5_7_transition.png", dpi=150)
+
+#b
+m = t >= T_SKIP_VI
+fig2, ax = plt.subplots(figsize=(8, 4.5))
+ax.plot(om_sig("I_stack")[m],  om_sig("V_stack")[m],  "k",   lw=2.0, label="OpenModelica")
+ax.plot(sim_sig("I_stack")[m], sim_sig("V_stack")[m], "r--", lw=1.2, label="Simulink FMU")
+ax.set(xlabel="I_stack (A)", ylabel="V_stack (V)", title="V-I trace: OpenModelica vs Simulink FMU")
+ax.grid(alpha=0.3); ax.legend()
+fig2.tight_layout(); fig2.savefig("align_5_8_vi_trace.png", dpi=150)
+
+
+for n in ["V_cell", "V_cell_static", "V_stack", "I_stack"]:
+    d = np.abs(om_sig(n) - sim_sig(n))
+    print(f"{n:14s} max |diff| = {d.max():.3g}   RMS = {np.sqrt(np.mean(d**2)):.3g}")
+
+plt.show()
+#plots 5.8-5.10
+DT = 0.005          # communication step (s); keep well below 0.02 s (filter T = 0.01 s)
+T_END = 400.0
+T_SKIP_VI = 10.0    # V-I trace: drop the initial 0 -> 0.2 A ramp (t < 10 s)
+
+md = read_model_description(fmu)
+available = {v.name for v in md.modelVariables}
+outputs = [n for n in ("V_stack", "I_stack", "V_cell", "V_cell_static") if n in available]
+for need in ("V_cell", "V_cell_static"):
+    if need not in available:
+        raise RuntimeError(f"{need} is not an output of this FMU; re-export the full URFC_FMU.")
+
+# Current profile: FC hold, then step into electrolysis
+prof_t = [0, 10, 100, 110, T_END]
+prof_i = [0, 0.2, 0.2, -0.35, -0.35]
+t = np.arange(0, T_END + DT, DT)
+u = np.zeros(len(t), dtype=[("time", float), ("I_cmd", float)])
+u["time"] = t
+u["I_cmd"] = np.interp(t, prof_t, prof_i)
+
+r = simulate_fmu(fmu, input=u, stop_time=T_END, output_interval=DT, output=outputs)
+tt = r["time"]
+
+fig1, ax1 = plt.subplots(figsize=(8, 4.5))
+ax1.plot(tt, r["V_cell"] - r["V_cell_static"], color="tab:blue")
+ax1.axhline(0, color="k", lw=0.5)
+ax1.set(title="Relaxation offset (dynamic - static cell voltage)",
+        xlabel="time (s)", ylabel="V")
+ax1.grid(alpha=0.3)
+fig1.tight_layout()
+fig1.savefig("urfc_1_relaxation_offset.png", dpi=150)
+
+fig2, ax2 = plt.subplots(figsize=(8, 4.5))
+ax2.plot(tt, r["V_cell"], label="V_cell (dynamic)")
+ax2.plot(tt, r["V_cell_static"], "--", label="V_cell_static (algebraic)")
+ax2.set(xlim=(95, 135), title="Zoom: fuel cell to electrolysis transition",
+        xlabel="time (s)", ylabel="V")
+ax2.grid(alpha=0.3)
+ax2.legend()
+fig2.tight_layout()
+fig2.savefig("urfc_2_fc_ec_transition.png", dpi=150)
+
+mask = tt >= T_SKIP_VI
+fig3, ax3 = plt.subplots(figsize=(8, 4.5))
+ax3.plot(r["I_stack"][mask], r["V_stack"][mask], color="tab:blue", lw=1.5)
+ax3.set(title="V-I trace", xlabel="I_stack (A)", ylabel="V_stack (V)")
+ax3.grid(alpha=0.3)
+fig3.tight_layout()
+fig3.savefig("urfc_3_vi_trace.png", dpi=150)
+
+plt.show()
+
+#plots 5.5/5.6
+# --- Configuration & Shared Constants ---
+CELL_AREA_CM2 = 30.0  # Cell active area in cm²
+POTENTIOSTAT_DIR = (
+    r"C:\Users\jaspe\OneDrive\Documenten\thesis documentatie\csv_output"
+)
+sim_path = r"C:\Users\jaspe\OneDrive\Documenten\thesis documentatie\PEMFuelCell.Tests.TestDiagramURFCv2\TestDiagramURFCv2_res.csv"
+
+if not os.path.exists(sim_path):
+    sim_candidates = [
+        f
+        for f in os.listdir(".")
+        if "res" in f.lower() or "urfc" in f.lower()
+    ]
+    if sim_candidates:
+        sim_path = sim_candidates[0]
+
+df_sim = pd.read_csv(sim_path)
+
+if "stack.PEMstack.i_density" in df_sim.columns:
+    sim_i = (
+        df_sim["stack.PEMstack.i_density"] / 10000.0
+    ).values  # A/m2 -> A/cm2
+    sim_v = df_sim["stack.PEMstack.V_cell"].values
+elif "i_A_cm2" in df_sim.columns:
+    sim_i = df_sim["i_A_cm2"].values
+    sim_v = df_sim["V_cell"].values
+else:
+    sim_i = df_sim.iloc[:, 0].values
+    sim_v = df_sim.iloc[:, 1].values
+
+# Filter positive current density (discharge mode)
+sim_mask = sim_i >= 0
+sim_i, sim_v = sim_i[sim_mask], sim_v[sim_mask]
+
+headers = {"User-Agent": "Mozilla/5.0"}
+
+
+# --- 2. Load Dataset 1: Low-Cost Discharge CSV Runs ---
+ref_discharge_runs = []
+base_discharge_url = "https://raw.githubusercontent.com/floorzagwijn/pem-fuelcell-thesis/main/data_raw/low_cost_discharge/"
+
+github_files_discharge = []
+try:
+    api_url = "https://api.github.com/repos/floorzagwijn/pem-fuelcell-thesis/contents/data_raw/low_cost_discharge"
+    req = urllib.request.Request(api_url, headers=headers)
+    with urllib.request.urlopen(req) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+        github_files_discharge = [
+            item["name"]
+            for item in data
+            if item["name"].lower().endswith(".csv")
+        ]
+except Exception as e:
+    print(f"Warning: Could not fetch discharge directory via GitHub API ({e}).")
+    github_files_discharge = [f"run_{i}.csv" for i in range(1, 10)] + [
+        f"discharge_{i}.csv" for i in range(1, 10)
+    ]
+
+for fname in github_files_discharge:
+    file_url = base_discharge_url + fname
+    try:
+        req = urllib.request.Request(file_url, headers=headers)
+        with urllib.request.urlopen(req) as response:
+            csv_text = response.read().decode("utf-8", errors="ignore")
+            df = pd.read_csv(io.StringIO(csv_text))
+
+            cols = df.columns.tolist()
+            i_col = [
+                c
+                for c in cols
+                if any(
+                    k in c.lower() for k in ["density", "current", "im", "i"]
+                )
+                and "voltage" not in c.lower()
+            ][0]
+            v_col = [
+                c
+                for c in cols
+                if any(k in c.lower() for k in ["voltage", "vf", "v"])
+                and "current" not in c.lower()
+            ][0]
+
+            i_vals = np.abs(df[i_col].values)
+            v_vals = df[v_col].values
+
+            # Convert to A/cm2 if total current in A
+            if "density" not in i_col.lower():
+                i_vals = i_vals / CELL_AREA_CM2
+
+            mask = (
+                np.isfinite(i_vals) & np.isfinite(v_vals) & (i_vals >= 0)
+            )
+            if np.sum(mask) > 0:
+                sort_idx = np.argsort(i_vals[mask])
+                ref_discharge_runs.append(
+                    {
+                        "name": fname.replace(".csv", ""),
+                        "i": i_vals[mask][sort_idx],
+                        "v": v_vals[mask][sort_idx],
+                    }
+                )
+    except Exception as e:
+        pass
+
+print(
+    f"Loaded {len(ref_discharge_runs)} CSV runs for Low-Cost Discharge dataset."
+)
+ref_potentiostat_runs = []
+
+# Fallback definitions if not declared prior in your script
+if "POTENTIOSTAT_DIR" not in globals():
+    POTENTIOSTAT_DIR = "./potentiostat"
+if "CELL_AREA_CM2" not in globals():
+    CELL_AREA_CM2 = 35.0  # Adjust to your active cell area
+
+# Check primary target output folder, fall back to current directory if not found
+search_dir = (
+    POTENTIOSTAT_DIR if os.path.exists(POTENTIOSTAT_DIR) else "./csv_output"
+)
+
+# Search strictly for Excel files (.xlsx, .xls)
+potentiostat_files = sorted(
+    glob.glob(os.path.join(search_dir, "*.xlsx"))
+    + glob.glob(os.path.join(search_dir, "*.xls"))
+)
+
+if not potentiostat_files:
+    # Local fallback for Excel files only
+    potentiostat_files = sorted(glob.glob("./*.xlsx") + glob.glob("./*.xls"))
+
+for filepath in potentiostat_files:
+    # Skip simulation output files if present in the same directory
+    if "res" in os.path.basename(filepath).lower():
+        continue
+
+    try:
+        # Read Excel file
+        df = pd.read_excel(filepath)
+        cols = df.columns.tolist()
+
+        # 1. Exclude time, index, point, and interval columns to prevent misidentification
+        data_cols = [
+            c
+            for c in cols
+            if not any(
+                ex in c.lower()
+                for ex in [
+                    "time",
+                    "pt",
+                    "point",
+                    "index",
+                    "step",
+                    "interval",
+                    "date",
+                    "sec",
+                    "second",
+                ]
+            )
+        ]
+
+        # 2. Strict matching for Current / Current Density column
+        i_col = next(
+            (
+                c
+                for c in data_cols
+                if any(
+                    k in c.lower()
+                    for k in [
+                        "density",
+                        "current",
+                        "discharge",
+                        "im",
+                        "a/cm2",
+                        "a/cm²",
+                        "amp",
+                    ]
+                )
+            ),
+            None,
+        )
+
+        # 3. Strict matching for Cell Voltage column
+        v_col = next(
+            (
+                c
+                for c in data_cols
+                if any(
+                    k in c.lower()
+                    for k in ["cell voltage", "voltage", "vf", "volt", "v_cell"]
+                )
+            ),
+            None,
+        )
+
+        if not i_col or not v_col:
+            print(
+                f"Skipped {os.path.basename(filepath)}: Could not identify valid I or V columns from {cols}"
+            )
+            continue
+
+        raw_i = np.abs(df[i_col].values)
+        v_vals = np.abs(df[v_col].values)
+
+        # Automatically convert mV to V if raw values are in millivolts
+        if np.nanmean(v_vals) > 50.0:
+            v_vals = v_vals / 1000.0
+
+        # Smart Scaling: Check if values are already A/cm² to prevent double-division
+        is_already_density = (
+            any(
+                unit in i_col.lower() for unit in ["density", "a/cm2", "a/cm²"]
+            )
+            or np.nanmax(raw_i) <= 2.0
+        )
+
+        if is_already_density:
+            i_vals = raw_i
+        else:
+            i_vals = raw_i / CELL_AREA_CM2
+
+        # Cleaning mask: finite values only, non-negative current density
+        mask = np.isfinite(i_vals) & np.isfinite(v_vals) & (i_vals >= 0)
+        clean_i = i_vals[mask]
+        clean_v = v_vals[mask]
+
+        if len(clean_i) > 0:
+            sort_idx = np.argsort(clean_i)
+            ref_potentiostat_runs.append(
+                {
+                    "name": os.path.basename(filepath).rsplit(".", 1)[0],
+                    "i": clean_i[sort_idx],
+                    "v": clean_v[sort_idx],
+                }
+            )
+            print(
+                f"Loaded clean Excel run: {os.path.basename(filepath)} "
+                f"({len(clean_i)} points | I: '{i_col}', V: '{v_col}')"
+            )
+    except Exception as e:
+        print(f"Error loading {filepath}: {e}")
+
+print(
+    f"\nLoaded {len(ref_potentiostat_runs)} clean Potentiostat Excel runs.\n"
+)
+
+# --- 4. Dataset Interpolation Helper ---
+def process_dataset(ref_runs, sim_i, sim_v):
+    if not ref_runs:
+        raise ValueError("No valid reference runs loaded.")
+
+    min_i = max(
+        sim_i.min(), max(r["i"].min() for r in ref_runs if len(r["i"]) > 0)
+    )
+    max_i = min(
+        sim_i.max(), min(r["i"].max() for r in ref_runs if len(r["i"]) > 0)
+    )
+
+    common_i = np.linspace(min_i, max_i, 500)
+
+    interp_v_matrix = []
+    for run in ref_runs:
+        f = interp1d(
+            run["i"],
+            run["v"],
+            bounds_error=False,
+            fill_value=np.nan,
+        )
+        interp_v_matrix.append(f(common_i))
+
+    interp_v_matrix = np.array(interp_v_matrix)
+    mean_ref_v = np.nanmean(interp_v_matrix, axis=0)
+
+    sort_sim = np.argsort(sim_i)
+    f_sim = interp1d(
+        sim_i[sort_sim], sim_v[sort_sim], bounds_error=False, fill_value=np.nan
+    )
+    sim_v_common = f_sim(common_i)
+
+    pointwise_rmse = np.sqrt((sim_v_common - mean_ref_v) ** 2)
+    overall_rmse = np.nanmean(pointwise_rmse)
+
+    return (
+        common_i,
+        mean_ref_v,
+        sim_v_common,
+        pointwise_rmse,
+        overall_rmse,
+        min_i,
+        max_i,
+    )
+
+# PLOT 1 & 2: Low-Cost Discharge Dataset
+if ref_discharge_runs:
+    (
+        comm_i_dis,
+        mean_v_dis,
+        sim_v_dis,
+        rmse_dis,
+        overall_rmse_dis,
+        min_i_dis,
+        max_i_dis,
+    ) = process_dataset(ref_discharge_runs, sim_i, sim_v)
+
+    fig1, (ax1_top, ax1_bot) = plt.subplots(
+        2,
+        1,
+        figsize=(9, 7),
+        sharex=True,
+        gridspec_kw={"height_ratios": [3, 1]},
+    )
+    ax1_top.plot(
+        comm_i_dis,
+        mean_v_dis,
+        label="Avg Reference (Low-Cost Discharge)",
+        color="#1f77b4",
+        linewidth=2.2,
+    )
+    ax1_top.plot(
+        comm_i_dis,
+        sim_v_dis,
+        label="Simulation Model (URFC v2)",
+        color="#d62728",
+        linestyle="--",
+        linewidth=2.2,
+    )
+    ax1_top.set_ylabel("Cell Voltage (V)", fontsize=11)
+    ax1_top.set_title(
+        f"Discharge Dataset: Polarization Curve (Shared Range: {min_i_dis:.4f}–{max_i_dis:.4f} A/cm²)",
+        fontsize=12,
+        pad=10,
+    )
+    ax1_top.legend(frameon=True, loc="upper right")
+    ax1_top.grid(True, linestyle=":", alpha=0.6)
+
+    ax1_bot.plot(
+        comm_i_dis,
+        rmse_dis * 1000,
+        color="#2ca02c",
+        linewidth=1.5,
+        label=f"Pointwise RMSE (Mean: {overall_rmse_dis * 1000:.2f} mV)",
+    )
+    ax1_bot.set_xlabel("Current Density ($A/cm^2$)", fontsize=11)
+    ax1_bot.set_ylabel("RMSE (mV)", fontsize=11)
+    ax1_bot.legend(frameon=True, loc="upper right")
+    ax1_bot.grid(True, linestyle=":", alpha=0.6)
+    plt.tight_layout()
+    plt.savefig("plot1_discharge_polarization_rmse.png", dpi=300)
+    plt.show()
+
+    p_ref_dis = mean_v_dis * comm_i_dis
+    p_sim_dis = sim_v_dis * comm_i_dis
+    mpp_ref_dis_idx = np.nanargmax(p_ref_dis)
+    mpp_sim_dis_idx = np.nanargmax(p_sim_dis)
+
+    fig2, ax2 = plt.subplots(figsize=(9, 5.5))
+    ax2.plot(
+        comm_i_dis,
+        p_ref_dis,
+        label="Avg Reference Power Density",
+        color="#1f77b4",
+        linewidth=2.2,
+    )
+    ax2.plot(
+        comm_i_dis,
+        p_sim_dis,
+        label="Simulation Power Density",
+        color="#d62728",
+        linestyle="--",
+        linewidth=2.2,
+    )
+    ax2.scatter(
+        [comm_i_dis[mpp_ref_dis_idx]],
+        [p_ref_dis[mpp_ref_dis_idx]],
+        color="#1f77b4",
+        s=80,
+        zorder=5,
+        edgecolor="black",
+        label=f"MPP: {p_ref_dis[mpp_ref_dis_idx]:.4f} W/cm² @ {comm_i_dis[mpp_ref_dis_idx]:.3f} A/cm²",
+    )
+    ax2.scatter(
+        [comm_i_dis[mpp_sim_dis_idx]],
+        [p_sim_dis[mpp_sim_dis_idx]],
+        color="#d62728",
+        s=80,
+        zorder=5,
+        edgecolor="black",
+        label=f"MPP: {p_sim_dis[mpp_sim_dis_idx]:.4f} W/cm² @ {comm_i_dis[mpp_sim_dis_idx]:.3f} A/cm²",
+    )
+    ax2.set_xlabel("Current Density ($A/cm^2$)", fontsize=11)
+    ax2.set_ylabel("Power Density ($W/cm^2$)", fontsize=11)
+    ax2.set_title(
+        "Discharge Dataset vs simulation: Power Density & Maximum Power Point (MPP)",
+        fontsize=12,
+        pad=10,
+    )
+    ax2.legend(frameon=True, loc="upper left")
+    ax2.grid(True, linestyle=":", alpha=0.6)
+    plt.tight_layout()
+    plt.savefig("plot2_discharge_power_mpp.png", dpi=300)
+    plt.show()
+
+# PLOT 3 & 4: Potentiostat Dataset
+if ref_potentiostat_runs:
+    (
+        comm_i_pot,
+        mean_v_pot,
+        sim_v_pot,
+        rmse_pot,
+        overall_rmse_pot,
+        min_i_pot,
+        max_i_pot,
+    ) = process_dataset(ref_potentiostat_runs, sim_i, sim_v)
+
+    fig3, (ax3_top, ax3_bot) = plt.subplots(
+        2,
+        1,
+        figsize=(9, 7),
+        sharex=True,
+        gridspec_kw={"height_ratios": [3, 1]},
+    )
+    ax3_top.plot(
+        comm_i_pot,
+        mean_v_pot,
+        label="Avg Reference (Potentiostat)",
+        color="#9467bd",
+        linewidth=2.2,
+    )
+    ax3_top.plot(
+        comm_i_pot,
+        sim_v_pot,
+        label="Simulation Model (URFC v2)",
+        color="#d62728",
+        linestyle="--",
+        linewidth=2.2,
+    )
+    ax3_top.set_ylabel("Cell Voltage (V)", fontsize=11)
+    ax3_top.set_title(
+        f"Potentiostat Dataset: Polarization Curve (Shared Range: {min_i_pot:.4f}–{max_i_pot:.4f} A/cm²)",
+        fontsize=12,
+        pad=10,
+    )
+    ax3_top.legend(frameon=True, loc="upper right")
+    ax3_top.grid(True, linestyle=":", alpha=0.6)
+
+    ax3_bot.plot(
+        comm_i_pot,
+        rmse_pot * 1000,
+        color="#2ca02c",
+        linewidth=1.5,
+        label=f"Pointwise RMSE (Mean: {overall_rmse_pot * 1000:.2f} mV)",
+    )
+    ax3_bot.set_xlabel("Current Density ($A/cm^2$)", fontsize=11)
+    ax3_bot.set_ylabel("RMSE (mV)", fontsize=11)
+    ax3_bot.legend(frameon=True, loc="upper right")
+    ax3_bot.grid(True, linestyle=":", alpha=0.6)
+    plt.tight_layout()
+    plt.savefig("plot3_potentiostat_polarization_rmse.png", dpi=300)
+    plt.show()
+
+    p_ref_pot = mean_v_pot * comm_i_pot
+    p_sim_pot = sim_v_pot * comm_i_pot
+    mpp_ref_pot_idx = np.nanargmax(p_ref_pot)
+    mpp_sim_pot_idx = np.nanargmax(p_sim_pot)
+
+    fig4, ax4 = plt.subplots(figsize=(9, 5.5))
+    ax4.plot(
+        comm_i_pot,
+        p_ref_pot,
+        label="Average Reference Power Density ",
+        color="#9467bd",
+        linewidth=2.2,
+    )
+    ax4.plot(
+        comm_i_pot,
+        p_sim_pot,
+        label="Simulation Power Density",
+        color="#d62728",
+        linestyle="--",
+        linewidth=2.2,
+    )
+    ax4.scatter(
+        [comm_i_pot[mpp_ref_pot_idx]],
+        [p_ref_pot[mpp_ref_pot_idx]],
+        color="#9467bd",
+        s=80,
+        zorder=5,
+        edgecolor="black",
+        label=f"MPP: {p_ref_pot[mpp_ref_pot_idx]:.4f} W/cm² @ {comm_i_pot[mpp_ref_pot_idx]:.3f} A/cm²",
+    )
+    ax4.scatter(
+        [comm_i_pot[mpp_sim_pot_idx]],
+        [p_sim_pot[mpp_sim_pot_idx]],
+        color="#d62728",
+        s=80,
+        zorder=5,
+        edgecolor="black",
+        label=f"MPP: {p_sim_pot[mpp_sim_pot_idx]:.4f} W/cm² @ {comm_i_pot[mpp_sim_pot_idx]:.3f} A/cm²",
+    )
+    ax4.set_xlabel("Current Density ($A/cm^2$)", fontsize=11)
+    ax4.set_ylabel("Power Density ($W/cm^2$)", fontsize=11)
+    ax4.set_title(
+        "Power Density & Maximum Power Point (MPP) - Potentiostat vs. Simulation",
+        fontsize=12,
+        pad=10,
+    )
+    ax4.legend(frameon=True, loc="upper left")
+    ax4.grid(True, linestyle=":", alpha=0.6)
+    plt.tight_layout()
+    plt.savefig("plot4_potentiostat_power_mpp.png", dpi=300)
+    plt.show()
