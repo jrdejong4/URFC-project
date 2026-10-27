@@ -1,4 +1,3 @@
-
 import argparse
 import glob
 import io
@@ -16,7 +15,7 @@ import pandas as pd
 from fmpy import read_model_description, simulate_fmu
 from scipy.interpolate import interp1d
 
-# 2. SETTINGS  
+# 2. SETTINGS
 
 try:
     SCRIPT_DIR = Path(__file__).resolve().parent
@@ -31,9 +30,9 @@ FMU_DIR = Path(r"C:/FMU_export")
 FMU_RAW_URL = "https://raw.githubusercontent.com/jrdejong4/URFC-project/main/"
 FMU_PEM_STACK = "TestDiagramPEMStack.fmu"   # figure 5.1
 FMU_EXPORT3 = "FMU_export2.fmu"             # figures 5.2 - 5.4 (Model Exchange)
-FMU_URFC = "FMU_export3.fmu"    # figures 5.8 - 5.10                 
+FMU_URFC = "FMU_export3.fmu"                # figures 5.9 - 5.11
 
-# ---- Local simulation results / measurements 
+# ---- Local simulation results / measurements
 THESIS_DOC = Path(r"C:\Users\jaspe\OneDrive\Documenten\thesis documentatie")
 
 POLARIZATION_SIM_CSV = (
@@ -46,7 +45,7 @@ OCV_LOCAL_CSV = (
 ELECTROLYSIS_SIM_CSV_CANDIDATES = [
     THESIS_DOC / "PEMFuelCell.Tests.TestDiagramURFCelectrolysis"
     / "TestDiagramURFCelectrolysis_res.csv",
-    "TestDiagramURFCelectrolysis_res.csv",
+    Path("TestDiagramURFCelectrolysis_res.csv"),
 ]
 OPENMODELICA_URFC_CSV = (
     THESIS_DOC / "PEMFuelCell.Tests.TestURFC_FMU" / "TestURFC_FMU_res.csv"
@@ -72,7 +71,7 @@ DISCHARGE_BASE_URL = (
     "https://raw.githubusercontent.com/floorzagwijn/pem-fuelcell-thesis/"
     "main/data_raw/low_cost_discharge/"
 )
-# Numerical settings 
+# Numerical settings
 SETTLE_TIME = 20.0           # s, setup transient removed in figures 5.2 - 5.4
 CELL_AREA_CM2 = 30.0         # active cell area [cm2]
 
@@ -82,8 +81,8 @@ OCV_WINDOW = 32              # s, length of the comparison window
 ONSET_THRESHOLD_A = 0.05     # electrolysis onset = first |I| > 50 mA
 COMMON_DT = 0.5              # s, resampling step when averaging the gas runs
 
-URFC_DT = 0.005              # s, communication step (keep well below the 0.01 s filter)
-URFC_T_END = 400     # s
+URFC_DT = 0.005              # s, solver step (keep well below the 0.01 s filter)
+URFC_T_END = 400             # s
 URFC_PROFILE_T = [0, 10, 100, 110, URFC_T_END]       # current profile: FC hold,
 URFC_PROFILE_I = [0, 0.2, 0.2, -0.35, -0.35]         # then step into electrolysis
 T_SKIP_VI = 10.0             # s, V-I traces skip the initial 0 -> 0.2 A ramp
@@ -109,8 +108,8 @@ def get_fmu(file_name):
     except Exception as exc:
         raise FileNotFoundError(
             f"Could not find {local} and could not download it from {url} ({exc}).\n"
-            "Put the .fmu file in the 'fmu' folder next to this script, or adjust "
-            "FMU_DIR / FMU_RAW_URL in the settings."
+            f"Put the .fmu file in {FMU_DIR} or adjust FMU_DIR / FMU_RAW_URL "
+            "in the settings."
         ) from exc
     return str(local)
 
@@ -160,8 +159,19 @@ def find_column(df, candidates):
                 return col
     return None
 
-# 4. FIGURES  (in thesis order)
 
+def pick_column(columns, keys, exclude=()):
+    """First column matching a key. Keys are tried in priority order, so a
+    specific key ('density') wins over a vague one ('i')."""
+    for key in keys:
+        for col in columns:
+            low = col.lower()
+            if key in low and not any(e in low for e in exclude):
+                return col
+    return None
+
+
+# 4. FIGURES  (in thesis order)
 
 # Figure 5.1 - PEM stack FMU: polarisation curve and outlet temperature
 def fig_5_1_pem_stack_fmu():
@@ -199,12 +209,11 @@ def fig_5_1_pem_stack_fmu():
     show()
 
 
-
-# Figures 5.2 - 5.4 - single-cell model (FMU_export2, Model Exchange)
+# Figures 5.2 - 5.4 - single-cell model (Model Exchange)
 
 @lru_cache(maxsize=None)
 def load_export3_results():
-    """Simulate FMU_export3 once; figures 5.2 - 5.4 share the result."""
+    """Simulate the single-cell FMU once; figures 5.2 - 5.4 share the result."""
     fmu_path = get_fmu(FMU_EXPORT3)
     results = simulate_fmu(
         fmu_path,
@@ -215,7 +224,7 @@ def load_export3_results():
     )
     df = pd.DataFrame(results)
     df = df[df["time"] >= SETTLE_TIME].copy()   # drop setup transients
-    df["time"] = df["time"] - SETTLE_TIME       # NEW: time axis starts at 0
+    df["time"] = df["time"] - SETTLE_TIME       # time axis starts at 0
     return df
 
 
@@ -247,20 +256,20 @@ def fig_5_2_polarization_curve():
 def fig_5_3_voltage_losses():
     df = load_export3_results()
     time = df["time"]
-    t_end = time.max()                              
-    fig, ax = plt.subplots(figsize=(8, 4.5))              
-    
+    t_end = time.max()
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+
     ax.plot(time, get_signal(df, "E_nernst"), color="#9467bd", linewidth=2, label="Nernst Voltage")
     ax.plot(time, get_signal(df, "dV_act"),   color="#d62728", linewidth=2, label="Activation Loss")
     ax.plot(time, get_signal(df, "dV_ohmic"), color="#2ca02c", linewidth=2, label="Ohmic Loss")
     ax.plot(time, get_signal(df, "dV_conc"),  color="#1f77b4", linewidth=2, label="Concentration Loss")
     ax.axhline(0, color="black", linestyle="--", linewidth=0.8, alpha=0.7)
 
-    ax.set_xlim(0, t_end)                                           
+    ax.set_xlim(0, t_end)
     ax.set_xlabel("Time (since sweep start) (s)", fontweight="bold")
     ax.set_ylabel("Voltage [V]", fontweight="bold")
     ax.set_title("Cell Voltage Loss visualization", fontweight="bold")
-    ax.legend(loc="lower right")   
+    ax.legend(loc="lower right")
     fig.tight_layout()
     save_fig(fig, "Plot2_Losses_FMU.png", dpi=300)
     show()
@@ -279,14 +288,15 @@ def fig_5_4_manifold_pressures():
     ax.plot(time, p_o2, color="#ff7f0e", linewidth=2, label=r"$p_{\mathrm{O2}}$")
     ax.plot(time, p_h2o, color="#2ca02c", linewidth=2, label=r"$p_{\mathrm{H2O}}$")
 
-    ax.set_xlim(0, t_end)                                          
-    ax.set_xlabel("Time since sweep start (s)", fontweight="bold") 
+    ax.set_xlim(0, t_end)
+    ax.set_xlabel("Time since sweep start (s)", fontweight="bold")
     ax.set_ylabel("Partial Pressure [kPa]", fontweight="bold")
     ax.set_title("Gas & Water Manifold Dynamics", fontweight="bold")
     ax.legend()
     fig.tight_layout()
     save_fig(fig, "Plot3_Pressures_FMU.png", dpi=300)
     show()
+
 
 # Figures 5.5 / 5.6 - simulated polarisation curve vs. two measured data sets
 
@@ -323,8 +333,11 @@ def load_simulated_polarization():
             f for f in os.listdir(".")
             if f.lower().endswith(".csv") and ("res" in f.lower() or "urfc" in f.lower())
         )
-        if candidates:
-            sim_path = Path(candidates[0])
+        if not candidates:
+            raise FileNotFoundError(
+                f"Simulated polarisation CSV not found: {POLARIZATION_SIM_CSV}"
+            )
+        sim_path = Path(candidates[0])
 
     df_sim = pd.read_csv(sim_path)
 
@@ -338,7 +351,7 @@ def load_simulated_polarization():
         sim_i = df_sim.iloc[:, 0].values
         sim_v = df_sim.iloc[:, 1].values
 
-    mask = sim_i >= 0  # discharge mode only
+    mask = (sim_i >= 0) & np.isfinite(sim_i) & np.isfinite(sim_v)  # discharge mode only
     return sim_i[mask], sim_v[mask]
 
 
@@ -360,17 +373,19 @@ def load_discharge_runs():
     for fname in file_names:
         try:
             df = pd.read_csv(io.StringIO(http_get(DISCHARGE_BASE_URL + fname)))
-
             cols = df.columns.tolist()
-            i_col = [c for c in cols
-                     if any(k in c.lower() for k in ["density", "current", "im", "i"])
-                     and "voltage" not in c.lower()][0]
-            v_col = [c for c in cols
-                     if any(k in c.lower() for k in ["voltage", "vf", "v"])
-                     and "current" not in c.lower()][0]
 
-            i_vals = np.abs(df[i_col].values)
-            v_vals = df[v_col].values
+            # Priority-ordered matching (the old "any column containing 'i'"
+            # test happily picked 'Time' or 'Point' as the current column).
+            i_col = pick_column(cols, ["density", "current", "im"],
+                                exclude=["voltage", "time"])
+            v_col = pick_column(cols, ["voltage", "vf", "volt"],
+                                exclude=["current", "time"])
+            if i_col is None or v_col is None:
+                raise ValueError(f"no current/voltage column in {cols}")
+
+            i_vals = np.abs(df[i_col].values.astype(float))
+            v_vals = df[v_col].values.astype(float)
             if "density" not in i_col.lower():      # total current [A] -> A/cm2
                 i_vals = i_vals / CELL_AREA_CM2
 
@@ -395,12 +410,13 @@ def load_potentiostat_runs():
     runs = []
     search_dir = POTENTIOSTAT_DIR if os.path.exists(POTENTIOSTAT_DIR) else "./csv_output"
 
-    files = sorted(glob.glob(os.path.join(search_dir, "*.xlsx"))
-                   + glob.glob(os.path.join(search_dir, "*.xls")))
+    files = sorted(glob.glob(os.path.join(str(search_dir), "*.xlsx"))
+                   + glob.glob(os.path.join(str(search_dir), "*.xls")))
     if not files:   # local fallback
         files = sorted(glob.glob("./*.xlsx") + glob.glob("./*.xls"))
 
-    excluded = ["time", "pt", "point", "index", "step", "interval", "date", "sec", "second"]
+    excluded = ["time", "pt", "point", "index", "step", "interval", "date",
+                "sec", "second", "sample"]
     current_keys = ["density", "current", "discharge", "im", "a/cm2", "a/cm²", "amp"]
     voltage_keys = ["cell voltage", "voltage", "vf", "volt", "v_cell"]
 
@@ -411,22 +427,21 @@ def load_potentiostat_runs():
 
         try:
             df = pd.read_excel(filepath)
-            cols = df.columns.tolist()
+            cols = [str(c) for c in df.columns]
+            df.columns = cols
 
             # Ignore time/index-like columns to avoid misidentification
             data_cols = [c for c in cols if not any(ex in c.lower() for ex in excluded)]
-            i_col = next((c for c in data_cols
-                          if any(k in c.lower() for k in current_keys)), None)
-            v_col = next((c for c in data_cols
-                          if any(k in c.lower() for k in voltage_keys)), None)
+            i_col = pick_column(data_cols, current_keys)
+            v_col = pick_column(data_cols, voltage_keys)
 
             if not i_col or not v_col:
                 print(f"Skipped {basename}: Could not identify valid I or V columns "
                       f"from {cols}")
                 continue
 
-            raw_i = np.abs(df[i_col].values)
-            v_vals = np.abs(df[v_col].values)
+            raw_i = np.abs(df[i_col].values.astype(float))
+            v_vals = np.abs(df[v_col].values.astype(float))
 
             if np.nanmean(v_vals) > 50.0:    # mV -> V
                 v_vals = v_vals / 1000.0
@@ -464,6 +479,8 @@ def process_dataset(ref_runs, sim_i, sim_v):
 
     min_i = max(sim_i.min(), max(r["i"].min() for r in ref_runs if len(r["i"]) > 0))
     max_i = min(sim_i.max(), min(r["i"].max() for r in ref_runs if len(r["i"]) > 0))
+    if max_i <= min_i:
+        raise ValueError("Simulation and reference runs share no current range.")
     common_i = np.linspace(min_i, max_i, 500)
 
     interp_v = np.array([
@@ -476,25 +493,25 @@ def process_dataset(ref_runs, sim_i, sim_v):
     sim_v_common = interp1d(sim_i[order], sim_v[order],
                             bounds_error=False, fill_value=np.nan)(common_i)
 
-    pointwise_rmse = np.sqrt((sim_v_common - mean_ref_v) ** 2)
+    diff = sim_v_common - mean_ref_v
     return {
         "i": common_i,
         "ref_v": mean_ref_v,
         "sim_v": sim_v_common,
-        "rmse": pointwise_rmse,
-        "overall_rmse": np.nanmean(pointwise_rmse),
+        "abs_error": np.abs(diff),                       # pointwise |error|
+        "overall_rmse": np.sqrt(np.nanmean(diff ** 2)),  # true RMSE over the range
         "min_i": min_i,
         "max_i": max_i,
     }
 
 
 def plot_polarization_and_power(style, runs, sim_i, sim_v):
-    """Polarisation curve + RMSE, then power density + MPP, for one data set."""
+    """Polarisation curve + error, then power density + MPP, for one data set."""
     res = process_dataset(runs, sim_i, sim_v)
     i = res["i"]
     sim_color = "#d62728"
 
-    # --- polarisation curve with pointwise RMSE ---
+    # --- polarisation curve with pointwise error ---
     fig1, (ax_top, ax_bot) = plt.subplots(
         2, 1, figsize=(9, 7), sharex=True, gridspec_kw={"height_ratios": [3, 1]}
     )
@@ -502,7 +519,7 @@ def plot_polarization_and_power(style, runs, sim_i, sim_v):
                 color=style["color"], linewidth=2.2)
     ax_top.plot(i, res["sim_v"], label="Simulation Model (URFC v2)",
                 color=sim_color, linestyle="--", linewidth=2.2)
-    ax_top.set_xlim(0, res["max_i"])  
+    ax_top.set_xlim(0, res["max_i"])
     ax_top.set_ylabel("Cell Voltage (V)", fontsize=11)
     ax_top.set_title(
         f"{style['name']} Dataset: Polarization Curve "
@@ -512,10 +529,10 @@ def plot_polarization_and_power(style, runs, sim_i, sim_v):
     ax_top.legend(frameon=True, loc="upper right")
     ax_top.grid(True, linestyle=":", alpha=0.6)
 
-    ax_bot.plot(i, res["rmse"] * 1000, color="#2ca02c", linewidth=1.5,
-                label=f"Pointwise RMSE (Mean: {res['overall_rmse'] * 1000:.2f} mV)")
+    ax_bot.plot(i, res["abs_error"] * 1000, color="#2ca02c", linewidth=1.5,
+                label=f"|Error| (RMSE over range: {res['overall_rmse'] * 1000:.2f} mV)")
     ax_bot.set_xlabel("Current Density ($A/cm^2$)", fontsize=11)
-    ax_bot.set_ylabel("RMSE (mV)", fontsize=11)
+    ax_bot.set_ylabel("|Error| (mV)", fontsize=11)
     ax_bot.legend(frameon=True, loc="upper right")
     ax_bot.grid(True, linestyle=":", alpha=0.6)
     fig1.tight_layout()
@@ -538,7 +555,7 @@ def plot_polarization_and_power(style, runs, sim_i, sim_v):
     ax.scatter([i[mpp_sim]], [p_sim[mpp_sim]], color=sim_color, s=80, zorder=5,
                edgecolor="black",
                label=f"MPP: {p_sim[mpp_sim]:.4f} W/cm² @ {i[mpp_sim]:.3f} A/cm²")
-    ax.set_xlim(0, res["max_i"])   
+    ax.set_xlim(0, res["max_i"])
     ax.set_xlabel("Current Density ($A/cm^2$)", fontsize=11)
     ax.set_ylabel("Power Density ($W/cm^2$)", fontsize=11)
     ax.set_title(style["power_title"], fontsize=12, pad=10)
@@ -563,11 +580,12 @@ def fig_5_5_5_6_polarization_vs_datasets():
     if not (discharge_runs or potentiostat_runs):
         print("No reference data found - nothing to plot for figures 5.5 / 5.6.")
 
+
 # Figure 5.7 - open-circuit-voltage comparison: model vs. fuel cell reference
 
 def fig_5_7_ocv_comparison():
     df_local = pd.read_csv(OCV_LOCAL_CSV)
-    df_ref = pd.read_csv(OCV_REFERENCE_URL)
+    df_ref = pd.read_csv(io.StringIO(http_get(OCV_REFERENCE_URL)))
     df_local.columns = df_local.columns.str.strip()
     df_ref.columns = df_ref.columns.str.strip()
 
@@ -584,22 +602,27 @@ def fig_5_7_ocv_comparison():
                              f"Local columns: {list(df_local.columns)}\n"
                              f"Reference columns: {list(df_ref.columns)}")
 
+    # merge_asof needs identical key dtypes
+    df_local[time_local] = df_local[time_local].astype(float)
+    df_ref[time_ref] = df_ref[time_ref].astype(float)
+
     local_win = df_local[(df_local[time_local] >= OCV_T0)
                          & (df_local[time_local] <= OCV_T0 + OCV_WINDOW)].copy()
     local_win["Time_Aligned"] = local_win[time_local] - OCV_T0
     ref_win = df_ref[(df_ref[time_ref] >= 0) & (df_ref[time_ref] <= OCV_WINDOW)].copy()
 
-    # Difference model - reference (nearest reference sample)
+    # Difference model - reference (nearest reference sample).  The reference
+    # voltage is renamed first so the suffix logic of merge cannot bite.
+    ref_for_merge = (ref_win.sort_values(time_ref)[[time_ref, v_ref]]
+                     .rename(columns={time_ref: "_t_ref", v_ref: "_v_ref"}))
     merged = pd.merge_asof(
         local_win.sort_values("Time_Aligned"),
-        ref_win.sort_values(time_ref)[[time_ref, v_ref]],
+        ref_for_merge,
         left_on="Time_Aligned",
-        right_on=time_ref,
+        right_on="_t_ref",
         direction="nearest",
-        suffixes=("", "_ref"),
     )
-    v_ref_merged = v_ref + "_ref" if v_ref in local_win.columns else v_ref
-    merged["Difference"] = merged[v_local] - merged[v_ref_merged]
+    merged["Difference"] = merged[v_local] - merged["_v_ref"]
 
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 7), sharex=True)
 
@@ -617,12 +640,13 @@ def fig_5_7_ocv_comparison():
                  color="green", label="Resistance")
         ax3.set_ylabel(r"Resistance ($\Omega$)")
         ax3.legend(loc="upper right")
-    
+
     ax3.set_xlim(0, OCV_WINDOW)
     ax3.set_xlabel("Time (s)")
     fig.tight_layout()
     save_fig(fig, "fig5_7_ocv_comparison.png", dpi=200)
     show()
+
 
 # Figure 5.8 - electrolysis voltage: model vs. mean of 5 measured gas runs
 
@@ -669,7 +693,11 @@ def load_electrolysis_sim_csv():
 def load_gasrun(name):
     """One measured gas run: local copy if present, otherwise from GitHub."""
     path = find_file(name, GASRUN_LOCAL_DIRS)
-    df = pd.read_csv(path if path is not None else GASRUN_URL_TEMPLATE.format(name=name))
+    if path is not None:
+        df = pd.read_csv(path)
+    else:
+        df = pd.read_csv(io.StringIO(http_get(GASRUN_URL_TEMPLATE.format(name=name))))
+    df.columns = df.columns.str.strip()
     df = df.rename(columns={"Voltage": "voltage", "Current": "current", "Time": "time"})
     return df[["time", "voltage", "current"]].astype(float)
 
@@ -735,40 +763,45 @@ def fig_5_8_electrolysis_comparison():
     ax3.set_xlabel("Time from electrolysis onset (s)")
     ax3.set_ylabel("Current (A)")
     ax3.legend()
-    ax3.set_xlim(0, t_max)   
+    ax3.set_xlim(0, t_max)
     fig.suptitle("Dynamic comparison model versus fuel cell", fontweight="bold")
-    fig.tight_layout()
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0, 1, 0.97])   # leave room for the suptitle
     save_fig(fig, "electrolysis_comparison.png", dpi=200)
     show()
 
+
 # Figures 5.9 - 5.11 - URFC FMU: relaxation offset, FC -> EC transition, V-I trace
 
-def fig_5_8_to_5_10_urfc_fmu():
+def fig_5_9_to_5_11_urfc_fmu():
     fmu = get_fmu(FMU_URFC)
 
     md = read_model_description(fmu)
     available = {v.name for v in md.modelVariables}
-    outputs = [n for n in ("V_stack", "I_stack", "V_cell_static")
-               if n in available]
-    for need in ("V_stack", "V_cell_static"):
+    for need in ("V_stack", "I_stack", "V_cell_static", "I_cmd"):
         if need not in available:
-            raise RuntimeError(f"{need} is not an output of this FMU; "
+            raise RuntimeError(f"{need} is not a variable of this FMU; "
                                "re-export the full URFC_FMU.")
+    outputs = ["V_stack", "I_stack", "V_cell_static"]
 
-    # Current profile: FC hold, then step into electrolysis
+    # Current profile: FC hold, then step into electrolysis.
+    # (Previously this was built but never passed to the simulation.)
     t = np.arange(0, URFC_T_END + URFC_DT, URFC_DT)
     u = np.zeros(len(t), dtype=[("time", float), ("I_cmd", float)])
     u["time"] = t
     u["I_cmd"] = np.interp(t, URFC_PROFILE_T, URFC_PROFILE_I)
 
     r = simulate_fmu(
-    fmu, fmi_type="ModelExchange",
-    solver="CVode",              
-    relative_tolerance=1e-5,
-    step_size=0.01,              
-    output_interval=0.05,
-)
+        fmu,
+        fmi_type="ModelExchange",
+        solver="CVode",
+        start_time=0.0,
+        stop_time=URFC_T_END,
+        relative_tolerance=1e-5,
+        step_size=URFC_DT,
+        output_interval=0.05,
+        input=u,
+        output=outputs,
+    )
     tt = r["time"]
     v_stack = r["V_stack"]
     v_stack_static = N_CELLS * r["V_cell_static"]
@@ -779,7 +812,6 @@ def fig_5_8_to_5_10_urfc_fmu():
     ax1.set(title="Relaxation offset (dynamic - static stack voltage)",
             xlabel="time (s)", ylabel="V",
             xlim=(0, URFC_T_END))
-    xlim=(0, URFC_T_END)
     ax1.grid(alpha=0.3)
     fig1.tight_layout()
     save_fig(fig1, "urfc_1_relaxation_offset.png")
@@ -802,6 +834,7 @@ def fig_5_8_to_5_10_urfc_fmu():
     fig3.tight_layout()
     save_fig(fig3, "urfc_3_vi_trace.png")
     show()
+
 
 # Figure 5.12 - OpenModelica vs. Simulink FMU
 
@@ -832,7 +865,7 @@ def fig_5_12_openmodelica_vs_simulink():
     ax.grid(alpha=0.3)
     ax.legend(fontsize=8)
     fig1.tight_layout()
-    save_fig(fig1, "align_5_7_transition.png")
+    save_fig(fig1, "fig5_12a_transition.png")
 
     # (b) V-I trace
     m = t >= T_SKIP_VI
@@ -845,13 +878,30 @@ def fig_5_12_openmodelica_vs_simulink():
     ax.grid(alpha=0.3)
     ax.legend()
     fig2.tight_layout()
-    save_fig(fig2, "align_5_8_vi_trace.png")
+    save_fig(fig2, "fig5_12b_vi_trace.png")
 
     # Agreement between the two tools
     for n in ["V_cell", "V_cell_static", "V_stack", "I_stack"]:
         d = np.abs(om_sig(n) - sim_sig(n))
         print(f"{n:14s} max |diff| = {d.max():.3g}   RMS = {np.sqrt(np.mean(d ** 2)):.3g}")
     show()
+
+
+# Registry of runnable figures (this was missing -> NameError in main()).
+FIGURES = {
+    "5.1":      ("PEM stack FMU: polarisation + outlet temperature", fig_5_1_pem_stack_fmu),
+    "5.2":      ("URFC polarisation curve", fig_5_2_polarization_curve),
+    "5.3":      ("Cell voltage losses", fig_5_3_voltage_losses),
+    "5.4":      ("Manifold partial pressures", fig_5_4_manifold_pressures),
+    "5.5-5.6":  ("Polarisation + power vs. measured data sets",
+                 fig_5_5_5_6_polarization_vs_datasets),
+    "5.7":      ("OCV comparison model vs. reference", fig_5_7_ocv_comparison),
+    "5.8":      ("Electrolysis voltage model vs. gas runs", fig_5_8_electrolysis_comparison),
+    "5.9-5.11": ("URFC FMU: relaxation, FC->EC transition, V-I trace",
+                 fig_5_9_to_5_11_urfc_fmu),
+    "5.12":     ("OpenModelica vs. Simulink FMU", fig_5_12_openmodelica_vs_simulink),
+}
+
 
 # 5. RUN FIGURES
 def main(argv=None):
@@ -865,7 +915,7 @@ def main(argv=None):
     args, _ = parser.parse_known_args(argv)
 
     if args.list:
-        for key, (title, _) in FIGURES.items():
+        for key, (title, _func) in FIGURES.items():
             print(f"{key:9s} {title}")
         return 0
 
@@ -894,6 +944,10 @@ def main(argv=None):
         status = f"FAILED ({failures[key]})" if key in failures else "ok"
         print(f"  {key:9s} {status}")
     return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 
 if __name__ == "__main__":
     raise SystemExit(main())
