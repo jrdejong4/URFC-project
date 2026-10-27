@@ -721,8 +721,7 @@ def fig_5_8_electrolysis_comparison():
     ax1.plot(sim["time"], sim["voltage"], label="Model", color="tab:orange")
     ax1.set_ylabel("Cell voltage (V)")
     ax1.legend()
-    ax1.set_title("Electrolysis voltage: model vs. reference "
-                  "(5-run average, Figure 14 comparison)")
+    ax1.set_title("Electrolysis voltage and current: model vs. reference average comparison")
 
     ax2 = axes[1]
     ax2.plot(ref["time"], v_diff, color="tab:red",
@@ -738,6 +737,8 @@ def fig_5_8_electrolysis_comparison():
     ax3.set_ylabel("Current (A)")
     ax3.legend()
     ax3.set_xlim(0, t_max)   
+    fig.suptitle("Dynamic comparison model versus fuel cell", fontweight="bold")
+    fig.tight_layout()
     fig.tight_layout()
     save_fig(fig, "electrolysis_comparison.png", dpi=200)
     show()
@@ -771,7 +772,7 @@ def fig_5_8_to_5_10_urfc_fmu():
     ax1.axhline(0, color="k", lw=0.5)
     ax1.set(title="Relaxation offset (dynamic - static cell voltage)",
             xlabel="time (s)", ylabel="V")
-    xlim=(0, URFC_T_END))  
+    xlim=(0, URFC_T_END)
     ax1.grid(alpha=0.3)
     fig1.tight_layout()
     save_fig(fig1, "urfc_1_relaxation_offset.png")
