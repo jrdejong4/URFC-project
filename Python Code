@@ -88,7 +88,7 @@ URFC_T_END = 400.0           # s
 URFC_PROFILE_T = [0, 10, 100, 110, URFC_T_END]       # current profile: FC hold,
 URFC_PROFILE_I = [0, 0.2, 0.2, -0.35, -0.35]         # then step into electrolysis
 T_SKIP_VI = 10.0             # s, V-I traces skip the initial 0 -> 0.2 A ramp
-
+N_CELLS = 1
 plt.rcParams.update({"font.size": 10, "axes.grid": True})
 
 
@@ -750,9 +750,9 @@ def fig_5_8_to_5_10_urfc_fmu():
 
     md = read_model_description(fmu)
     available = {v.name for v in md.modelVariables}
-    outputs = [n for n in ("V_stack", "I_stack", "V_cell", "V_cell_static")
+    outputs = [n for n in ("V_stack", "I_stack", "V_cell_static")
                if n in available]
-    for need in ("V_cell", "V_cell_static"):
+    for need in ("V_stack", "V_cell_static"):
         if need not in available:
             raise RuntimeError(f"{need} is not an output of this FMU; "
                                "re-export the full URFC_FMU.")
@@ -763,23 +763,26 @@ def fig_5_8_to_5_10_urfc_fmu():
     u["time"] = t
     u["I_cmd"] = np.interp(t, URFC_PROFILE_T, URFC_PROFILE_I)
 
-    r = simulate_fmu(fmu, input=u, stop_time=URFC_T_END,
+ r = simulate_fmu(fmu, input=u, stop_time=URFC_T_END,
                      output_interval=URFC_DT, output=outputs)
     tt = r["time"]
+    v_stack = r["V_stack"]
+    v_stack_static = N_CELLS * r["V_cell_static"]
 
     fig1, ax1 = plt.subplots(figsize=(8, 4.5))
-    ax1.plot(tt, r["V_cell"] - r["V_cell_static"], color="tab:blue")
+    ax1.plot(tt, v_stack - v_stack_static, color="tab:blue")
     ax1.axhline(0, color="k", lw=0.5)
-    ax1.set(title="Relaxation offset (dynamic - static cell voltage)",
-            xlabel="time (s)", ylabel="V")
+    ax1.set(title="Relaxation offset (dynamic - static stack voltage)",
+            xlabel="time (s)", ylabel="V",
+            xlim=(0, URFC_T_END)
     xlim=(0, URFC_T_END)
     ax1.grid(alpha=0.3)
     fig1.tight_layout()
     save_fig(fig1, "urfc_1_relaxation_offset.png")
 
     fig2, ax2 = plt.subplots(figsize=(8, 4.5))
-    ax2.plot(tt, r["V_cell"], label="V_cell (dynamic)")
-    ax2.plot(tt, r["V_cell_static"], "--", label="V_cell_static (algebraic)")
+    ax2.plot(tt, v_stack, label="V_stack (dynamic)")
+    ax2.plot(tt, v_stack_static, "--", label="V_stack_static (algebraic)")
     ax2.set(xlim=(95, 135), title="Zoom: fuel cell to electrolysis transition",
             xlabel="time (s)", ylabel="V")
     ax2.grid(alpha=0.3)
