@@ -31,7 +31,7 @@ SHOW_PLOTS = True            # set to False (or use --no-show) to only save
 FMU_DIR = Path(r"C:/FMU_export")
 FMU_RAW_URL = "https://raw.githubusercontent.com/jrdejong4/URFC-project/main/"
 FMU_PEM_STACK = "TestDiagramPEMStack.fmu"   # figure 5.1
-FMU_EXPORT3 = "FMU_export1.fmu"             # figures 5.2 - 5.4 (Model Exchange)
+FMU_EXPORT3 = "FMU_export2.fmu"             # figures 5.2 - 5.4 (Model Exchange)
 FMU_URFC = "FMU_export3.fmu"    # figures 5.8 - 5.10                 
 
 # ---- Local simulation results / measurements 
@@ -215,7 +215,9 @@ def load_export3_results():
         output_interval=0.1,
     )
     df = pd.DataFrame(results)
-    return df[df["time"] >= SETTLE_TIME].copy()  # drop setup transients
+    df = df[df["time"] >= SETTLE_TIME].copy()   # drop setup transients
+    df["time"] = df["time"] - SETTLE_TIME       # NEW: time axis starts at 0
+    return df
 
 
 def fig_5_2_polarization_curve():
@@ -224,18 +226,13 @@ def fig_5_2_polarization_curve():
     i_stack = get_signal(df, "I_stack")
 
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(i_stack, v_stack, color="#1f77b4", linewidth=2.5,
-            label=r"Polarization Curve ($V$-$I$)")
-    ax.axvline(0, color="gray", linestyle="--", alpha=0.8,
-               label=r"Zero Current Boundary ($I = 0\mathrm{A}$)")
+    ax.plot(i_stack, v_stack, color="#1f77b4", linewidth=2.5)
+    ax.axvline(0, color="gray", linestyle="--", alpha=0.8)
+    ax.set_xlim(-150, 150)
 
     ax.set_xlabel("Stack Current [A]", fontweight="bold")
     ax.set_ylabel("Stack Voltage [V]", fontweight="bold")
-    ax.set_title(
-        r"Plot 1: Polarization Curve ($V_{stack}$ vs $I_{stack}$, "
-        r"$t \geq 20\mathrm{s}$)",
-        fontweight="bold",
-    )
+    ax.set_title("Polarization Curve URFC stack", fontweight="bold")
 
     box = dict(boxstyle="round", facecolor="whitesmoke", alpha=0.8)
     ax.text(0.75, 0.5, "Fuel Cell Mode\n" r"($I > 0\mathrm{A}$)",
@@ -243,7 +240,6 @@ def fig_5_2_polarization_curve():
     ax.text(0.25, 0.5, "Electrolyzer Mode\n" r"($I < 0\mathrm{A}$)",
             transform=ax.transAxes, fontsize=10, ha="center", va="center", bbox=box)
 
-    ax.legend(loc="best")
     fig.tight_layout()
     save_fig(fig, "Plot1_Polarization_Curve.png", dpi=300)
     show()
@@ -252,25 +248,20 @@ def fig_5_2_polarization_curve():
 def fig_5_3_voltage_losses():
     df = load_export3_results()
     time = df["time"]
-
-    fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.plot(time, get_signal(df, "E_nernst"), color="#9467bd", linewidth=2,
-            label=r"Nernst Voltage ($E_{nernst}$)")
-    ax.plot(time, get_signal(df, "dV_act"), color="#d62728", linewidth=2,
-            label=r"Activation Loss ($\Delta V_{act}$)")
-    ax.plot(time, get_signal(df, "dV_ohmic"), color="#2ca02c", linewidth=2,
-            label=r"Ohmic Loss ($\Delta V_{ohmic}$)")
-    ax.plot(time, get_signal(df, "dV_conc"), color="#1f77b4", linewidth=2,
-            label=r"Concentration Loss ($\Delta V_{conc}$)")
+    t_end = time.max()                              
+    fig, ax = plt.subplots(figsize=(8, 4.5))              
+    
+    ax.plot(time, get_signal(df, "E_nernst"), color="#9467bd", linewidth=2, label="Nernst Voltage")
+    ax.plot(time, get_signal(df, "dV_act"),   color="#d62728", linewidth=2, label="Activation Loss")
+    ax.plot(time, get_signal(df, "dV_ohmic"), color="#2ca02c", linewidth=2, label="Ohmic Loss")
+    ax.plot(time, get_signal(df, "dV_conc"),  color="#1f77b4", linewidth=2, label="Concentration Loss")
     ax.axhline(0, color="black", linestyle="--", linewidth=0.8, alpha=0.7)
 
-    ax.set_xlabel("Time (s)", fontweight="bold")
-    ax.set_ylabel("Voltage / Overpotential [V]", fontweight="bold")
-    ax.set_title(
-        r"Plot 2: Single Cell Voltage Loss Breakdown ($t \geq 20\mathrm{s}$)",
-        fontweight="bold",
-    )
-    ax.legend(loc="center right")
+    ax.set_xlim(0, t_end)                                           
+    ax.set_xlabel("Time (since sweep start) (s)", fontweight="bold")
+    ax.set_ylabel("Voltage [V]", fontweight="bold")
+    ax.set_title("Cell Voltage Loss visualization", fontweight="bold")
+    ax.legend(loc="lower right")   
     fig.tight_layout()
     save_fig(fig, "Plot2_Losses_FMU.png", dpi=300)
     show()
@@ -279,6 +270,7 @@ def fig_5_3_voltage_losses():
 def fig_5_4_manifold_pressures():
     df = load_export3_results()
     time = df["time"]
+    t_end = time.max()
     p_h2 = get_signal(df, "p_H2") / 1000.0     # Pa -> kPa
     p_o2 = get_signal(df, "p_O2") / 1000.0
     p_h2o = get_signal(df, "p_H2O") / 1000.0
@@ -288,12 +280,10 @@ def fig_5_4_manifold_pressures():
     ax.plot(time, p_o2, color="#ff7f0e", linewidth=2, label=r"$p_{\mathrm{O2}}$")
     ax.plot(time, p_h2o, color="#2ca02c", linewidth=2, label=r"$p_{\mathrm{H2O}}$")
 
-    ax.set_xlabel("Time (s)", fontweight="bold")
+    ax.set_xlim(0, t_end)                                          
+    ax.set_xlabel("Time since sweep start (s)", fontweight="bold") 
     ax.set_ylabel("Partial Pressure [kPa]", fontweight="bold")
-    ax.set_title(
-        r"Plot 3: Gas & Water Manifold Dynamics ($t \geq 20\mathrm{s}$)",
-        fontweight="bold",
-    )
+    ax.set_title("Gas & Water Manifold Dynamics", fontweight="bold")
     ax.legend()
     fig.tight_layout()
     save_fig(fig, "Plot3_Pressures_FMU.png", dpi=300)
@@ -513,6 +503,7 @@ def plot_polarization_and_power(style, runs, sim_i, sim_v):
                 color=style["color"], linewidth=2.2)
     ax_top.plot(i, res["sim_v"], label="Simulation Model (URFC v2)",
                 color=sim_color, linestyle="--", linewidth=2.2)
+    ax_top.set_xlim(0, res["max_i"])  
     ax_top.set_ylabel("Cell Voltage (V)", fontsize=11)
     ax_top.set_title(
         f"{style['name']} Dataset: Polarization Curve "
@@ -548,6 +539,7 @@ def plot_polarization_and_power(style, runs, sim_i, sim_v):
     ax.scatter([i[mpp_sim]], [p_sim[mpp_sim]], color=sim_color, s=80, zorder=5,
                edgecolor="black",
                label=f"MPP: {p_sim[mpp_sim]:.4f} W/cm² @ {i[mpp_sim]:.3f} A/cm²")
+    ax.set_xlim(0, res["max_i"])   
     ax.set_xlabel("Current Density ($A/cm^2$)", fontsize=11)
     ax.set_ylabel("Power Density ($W/cm^2$)", fontsize=11)
     ax.set_title(style["power_title"], fontsize=12, pad=10)
@@ -586,7 +578,6 @@ def fig_5_7_ocv_comparison():
     v_ref = find_column(df_ref, ["Real_V"])
     res_col = find_column(df_local, ["R_load"])
 
-    # Fail early with a readable message if a column was not found
     for name, val in [("time_local", time_local), ("time_ref", time_ref),
                       ("v_local", v_local), ("v_ref", v_ref)]:
         if val is None:
@@ -627,7 +618,8 @@ def fig_5_7_ocv_comparison():
                  color="green", label="Resistance")
         ax3.set_ylabel(r"Resistance ($\Omega$)")
         ax3.legend(loc="upper right")
-
+    
+    ax3.set_xlim(0, OCV_WINDOW)
     ax3.set_xlabel("Time (s)")
     fig.tight_layout()
     save_fig(fig, "fig5_7_ocv_comparison.png", dpi=200)
@@ -745,7 +737,7 @@ def fig_5_8_electrolysis_comparison():
     ax3.set_xlabel("Time from electrolysis onset (s)")
     ax3.set_ylabel("Current (A)")
     ax3.legend()
-
+    ax3.set_xlim(0, t_max)   
     fig.tight_layout()
     save_fig(fig, "electrolysis_comparison.png", dpi=200)
     show()
@@ -779,6 +771,7 @@ def fig_5_8_to_5_10_urfc_fmu():
     ax1.axhline(0, color="k", lw=0.5)
     ax1.set(title="Relaxation offset (dynamic - static cell voltage)",
             xlabel="time (s)", ylabel="V")
+    xlim=(0, URFC_T_END))  
     ax1.grid(alpha=0.3)
     fig1.tight_layout()
     save_fig(fig1, "urfc_1_relaxation_offset.png")
