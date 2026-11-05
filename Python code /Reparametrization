@@ -1,0 +1,346 @@
+#!/usr/init/env python3
+"""
+Parametrization of the URFC cell model on the Gamry potentiostat polarization curves.
+Includes a 4th subplot for voltage difference (residuals in mV), y-axis capped at 1.1V,
+GitHub link import, Run 2 & 8, and custom labels.
+
+usage: python3 fit_urfc_parametrizations.py DATA_DIR OUT_DIR [--area 1.0] [--T 294.35] [--runs 2 8] [--jfit 0.02 0.10]
+"""
+import argparse, glob, json, os, re, urllib.request
+import numpy as np
+import pandas as pd
+from scipy.optimize import least_squares
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+R, F, NE = 8.314462618, 96485.33212, 2
+R_CONC_MODEL = 0.01       # ohm*cm2 (= 1e-6 ohm*m2, value in the model)
+
+
+# ------------------------------------------------------------------ data
+def read_dta(source):
+    if source.startswith("http://") or source.startswith("https://"):
+        req = urllib.request.urlopen(source)
+        content = req.read().decode("latin-1")
+    else:
+        content = open(source, encoding="latin-1").read()
+        
+    lines = content.splitlines()
+    s = next(i for i, l in enumerate(lines) if l.startswith("CURVE") and "\tTABLE" in l)
+    h = [x.strip() for x in lines[s + 1].split("\t")]
+    c = {k: h.index(k) for k in ("T", "Vf", "Im")}
+    t, v, i = [], [], []
+    for l in lines[s + 3:]:
+        p = l.split("\t")
+        try:
+            t.append(float(p[c["T"]].replace(",", ".")))
+            v.append(float(p[c["Vf"]].replace(",", ".")))
+            i.append(float(p[c["Im"]].replace(",", ".")))
+        except (IndexError, ValueError):
+            pass
+    return np.array(t), np.array(v), -np.array(i)        # discharge current > 0
+
+
+def load_runs(d):
+    runs = {}
+    if d.startswith("http://") or d.startswith("https://"):
+        clean_url = d.rstrip("/").replace("https://github.com/", "")
+        parts = clean_url.split("/")
+        owner, repo = parts[0], parts[1]
+        branch = parts[3] if "tree" in parts else "main"
+        path_start_idx = 4 if "tree" in parts else 2
+        path = "/".join(parts[path_start_idx:])
+            
+        api_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={branch}"
+        req = urllib.request.Request(api_url, headers={"User-Agent": "Python-URFC-Fitter"})
+        with urllib.request.urlopen(req) as resp:
+            files_info = json.loads(resp.read().decode("utf-8"))
+            
+        for item in files_info:
+            fname = item["name"]
+            if fname.endswith(".DTA") and "_IV_" in fname:
+                match = re.search(r"_IV_(\d+)", fname)
+                if match:
+                    n = int(match.group(1))
+                    download_url = item["download_url"]
+                    _, V, I = read_dta(download_url)
+                    k = int(np.argmax(I))
+                    o = np.argsort(I[:k + 1])
+                    runs[n] = (I[:k + 1][o], V[:k + 1][o])
+    else:
+        for f in sorted(glob.glob(os.path.join(d, "*_IV_*.DTA"))):
+            n = int(re.search(r"_IV_(\d+)", f).group(1))
+            _, V, I = read_dta(f)
+            k = int(np.argmax(I))
+            o = np.argsort(I[:k + 1])
+            runs[n] = (I[:k + 1][o], V[:k + 1][o])
+    return runs
+
+
+def grid_for(jmax, jmin=2e-4, n_lin=250, n_log=150):
+    g = np.unique(np.concatenate([np.linspace(jmin, jmax, n_lin), np.geomspace(jmin, jmax, n_log)]))
+    return g
+
+
+# ------------------------------------------------------------------ model
+def e_nernst(T, pH2=1.0, pO2=1.0):
+    return 1.229 - 0.85e-3 * (T - 298.15) + R * T / (2 * F) * np.log(pH2 * np.sqrt(pO2))
+
+
+def vmodel(x, j, T, EN, st):
+    jt = j + (10 ** x["lgjn"] if st["jn"] else 0.0)
+    alpha = x["alpha"] if st["alpha"] else 0.5
+    b = R * T / (alpha * NE * F)
+    act = b * np.arcsinh(jt / (2 * 10 ** x["lgj0"]))
+    ohm = x["Rohm"] * jt
+    if st["jL"]:
+        jL = 10 ** x["lgjL"]
+        conc = -R * T / (NE * F) * np.log(np.clip(1 - jt / jL, 1e-9, None))
+    else:
+        conc = R_CONC_MODEL * jt
+    return EN - act - ohm - conc
+
+
+STRUCT = {
+    "S1 current model (j0, R)":          dict(alpha=False, jn=False, jL=False),
+    "S2 + Tafel slope (alpha)":            dict(alpha=True,  jn=False, jL=False),
+    "S3 + crossover jn":                   dict(alpha=True,  jn=True,  jL=False),
+    "S4 + limiting current jL (log)":      dict(alpha=True,  jn=True,  jL=True),
+}
+ORDER = ["lgj0", "alpha", "Rohm", "lgjL", "lgjn"]
+LO = dict(lgj0=-13.0, alpha=0.10, Rohm=0.0, lgjL=None, lgjn=-5.0)
+HI = dict(lgj0=-3.0, alpha=1.00, Rohm=5.0, lgjL=1.0, lgjn=-1.5)
+
+
+def free_names(st):
+    f = ["lgj0", "Rohm"]
+    if st["alpha"]: f.insert(1, "alpha")
+    if st["jL"]: f.append("lgjL")
+    if st["jn"]: f.append("lgjn")
+    return f
+
+
+def fit(j, V, T, EN, st, n_starts=60, seed=3):
+    names = free_names(st)
+    lo = np.array([LO[k] if LO[k] is not None else np.log10(1.02 * j.max()) for k in names])
+    hi = np.array([HI[k] for k in names])
+    rng = np.random.default_rng(seed)
+
+    def res(p):
+        return vmodel(dict(zip(names, p)), j, T, EN, st) - V
+
+    best = None
+    for _ in range(n_starts):
+        x0 = lo + rng.random(len(names)) * (hi - lo)
+        try:
+            s = least_squares(res, x0, bounds=(lo, hi), x_scale=np.maximum(hi - lo, 1e-3) / 10, max_nfev=600)
+        except Exception:
+            continue
+        if best is None or s.cost < best.cost:
+            best = s
+    p = dict(zip(names, best.x))
+    dof = max(len(j) - len(names), 1)
+    cov = 2 * best.cost / dof * np.linalg.pinv(best.jac.T @ best.jac)
+    se = np.sqrt(np.diag(cov))
+    corr = cov / np.outer(se, se)
+    at_bound = [k for k, v, l, h in zip(names, best.x, lo, hi) if min(v - l, h - v) < 1e-3 * (h - l)]
+    return p, dict(zip(names, se)), corr, names, at_bound
+
+
+def stats(Vm, Vr, j):
+    return dict(RMSE_mV=1e3 * float(np.sqrt(np.mean((Vm - Vr) ** 2))),
+                maxerr_mV=1e3 * float(np.max(np.abs(Vm - Vr))),
+                eps_P_pct=100 * float((j * Vm).max() - (j * Vr).max()) / float((j * Vr).max()))
+
+
+# ------------------------------------------------------------------ main
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("data_dir", nargs="?", default="https://github.com/floorzagwijn/pem-fuelcell-thesis/tree/main/data_raw/potentiostat")
+    ap.add_argument("out_dir", nargs="?", default="./output_dir")
+    ap.add_argument("--area", type=float, default=1.0, help="active area [cm2]")
+    ap.add_argument("--T", type=float, default=21.2 + 273.15, help="cell temperature [K]")
+    ap.add_argument("--runs", type=int, nargs=2, default=[2, 8], help="run numbers for high and low curve (default: 2 and 8)")
+    ap.add_argument("--jfit", type=float, nargs=2, default=[0.02, 0.10], help="fit window [A/cm2]")
+    a = ap.parse_args()
+    os.makedirs(a.out_dir, exist_ok=True)
+
+    runs = load_runs(a.data_dir)
+    
+    hi_run, lo_run = a.runs
+    print(f"Using explicitly selected runs: high = run {hi_run}, low = run {lo_run}")
+
+    j1, j2 = a.jfit
+    jg = grid_for(j2, jmin=j1)
+
+    Vhi_win = np.interp(jg, runs[hi_run][0] / a.area, runs[hi_run][1])
+    Vlo_win = np.interp(jg, runs[lo_run][0] / a.area, runs[lo_run][1])
+    curves = {
+        "high": Vhi_win, 
+        "low": Vlo_win, 
+        "average": 0.5 * (Vhi_win + Vlo_win)
+    }
+    
+    jl = np.linspace(j1, j2, 400)
+    ref_lin = {k: np.interp(jl, jg, v) for k, v in curves.items()}
+
+    EN = e_nernst(a.T)
+    print(f"T = {a.T:.2f} K, E_Nernst = {EN:.4f} V, area = {a.area} cm2, fit window {j1}-{j2} A/cm2\n")
+
+    # ---- 1) Model selection
+    print("MODEL SELECTION (RMSE in the fit window)")
+    sel = {
+        "S1  j0, R_ohm":          dict(alpha=False, jn=False, jL=False),
+        "S2  + alpha":            dict(alpha=True,  jn=False, jL=False),
+        "S3  + jL (log term)":    dict(alpha=False, jn=False, jL=True),
+        "S4  + alpha + jn":       dict(alpha=True,  jn=True,  jL=False)
+    }
+    for cname, V in curves.items():
+        for sname, st in sel.items():
+            p, se, corr, names, atb = fit(jg, V, a.T, EN, st)
+            mm = stats(vmodel(p, jl, a.T, EN, st), ref_lin[cname], jl)
+            mc = float(np.max(np.abs(corr - np.eye(len(names))))) if len(names) > 1 else 0.0
+            ok = (not atb) and mc < 0.99
+            print(f"  {cname:8s} {sname:22s} RMSE {mm['RMSE_mV']:6.2f} mV  max|corr| {mc:5.3f}  at bound: {','.join(atb) or '-':14s} id={ok}")
+    print()
+
+    # ---- 2) Parametrizations (Structure S1)
+    st = sel["S1  j0, R_ohm"]
+    base = dict(lgj0=np.log10(1e-7), alpha=0.5, Rohm=0.15)
+    rows, P = [], {}
+    for cname, V in curves.items():
+        p, se, corr, names, atb = fit(jg, V, a.T, EN, st)
+        P[cname] = p
+        m_win = stats(vmodel(p, jl, a.T, EN, st), ref_lin[cname], jl)
+        
+        if cname == "high":
+            j_eval = runs[hi_run][0] / a.area
+            V_eval = runs[hi_run][1]
+        elif cname == "low":
+            j_eval = runs[lo_run][0] / a.area
+            V_eval = runs[lo_run][1]
+        else:
+            j_eval = jl
+            V_eval = ref_lin[cname]
+            
+        m_full = stats(vmodel(p, j_eval, a.T, EN, st), V_eval, j_eval)
+        b_win = stats(vmodel(base, jl, a.T, EN, st), ref_lin[cname], jl)
+        j0_cm2, Roh = 10 ** p["lgj0"], p["Rohm"]
+        rows.append({
+            "parametrization": cname, 
+            "reference_run": {"high": hi_run, "low": lo_run, "average": f"{hi_run}+{lo_run}"}[cname],
+            "i0 [A/m2]": j0_cm2 * 1e4, "i0 se (factor)": 10 ** se["lgj0"],
+            "R_ohmic [ohm cm2]": Roh, "R_ohmic se": se["Rohm"], "R_ohmic [ohm m2]": Roh * 1e-4,
+            "alpha (n=2)": 0.5, "R_conc [ohm m2]": R_CONC_MODEL * 1e-4,
+            "corr(i0,R)": float(corr[0, 1]),
+            "RMSE window [mV]": m_win["RMSE_mV"], "RMSE window, thesis defaults [mV]": b_win["RMSE_mV"],
+            "RMSE full [mV]": m_full["RMSE_mV"], "max err window [mV]": m_win["maxerr_mV"]
+        })
+    tab = pd.DataFrame(rows)
+    tab.to_csv(os.path.join(a.out_dir, "parametrizations.csv"), index=False)
+    json.dump(dict(hi_run=int(hi_run), lo_run=int(lo_run), T=a.T, E_N=EN, area_cm2=a.area, window=a.jfit,
+                   sets={k: dict(i0_A_per_m2=10 ** v["lgj0"] * 1e4, R_ohmic_ohm_m2=v["Rohm"] * 1e-4, alpha=0.5)
+                         for k, v in P.items()}),
+              open(os.path.join(a.out_dir, "parametrizations.json"), "w"), indent=2)
+    print(tab.T.to_string(header=False))
+
+    # ---- 3) Per-run RMSE evaluation
+    print("\nRMSE [mV] of each parameter set against each individual run (window):")
+    ev = {}
+    for n, (I, V) in sorted(runs.items()):
+        Vn = np.interp(jl, I / a.area, V)
+        ev[n] = {k: stats(vmodel(p, jl, a.T, EN, st), Vn, jl)["RMSE_mV"] for k, p in P.items()}
+    evdf = pd.DataFrame(ev).T.round(1)
+    evdf.index.name = "run"
+    print(evdf.to_string())
+    evdf.to_csv(os.path.join(a.out_dir, "per_run_rmse.csv"))
+    fig, axs = plt.subplots(2, 2, figsize=(12, 9), sharex=True)
+    axs = axs.flatten()  # Flatten into a 1D array of 4 axes for easy indexing
+    fig.suptitle("Recalibration of key parameters using Potentiostat reference", fontsize=13, y=0.98)
+    
+    fit_labels = {
+        "high": "high fit", 
+        "low": "low fit", 
+        "average": "average fit"
+    }
+    ref_labels = {
+        "high": "high reference", 
+        "low": "low reference", 
+        "average": "average reference"
+    }
+
+    target_runs = {"high": hi_run, "low": lo_run}
+
+    # Plot the first 3 polarization curve subplots (indices 0, 1, 2)
+    for idx in range(3):
+        cname = list(P.keys())[idx]
+        p = P[cname]
+        ax = axs[idx]
+
+        for n, (I, V) in runs.items():
+            ax.plot(I / a.area, V, color="0.8", lw=0.8)
+            
+        if cname in ["high", "low"]:
+            r_num = target_runs[cname]
+            I_run, V_run = runs[r_num]
+            j_run = I_run / a.area
+            
+            ax.plot(j_run, V_run, "k.", ms=2, label=ref_labels[cname])
+            jj = np.linspace(2e-4, j_run.max() * 0.999, 600)
+            ax.plot(jj, vmodel(p, jj, a.T, EN, st), "r-", label=fit_labels[cname])
+            ax.plot(jj, vmodel(base, jj, a.T, EN, st), "b:", label="thesis defaults")
+        else:
+            I_hi, V_hi = runs[hi_run]
+            I_lo, V_lo = runs[lo_run]
+            j_max_avg = min(I_hi.max(), I_lo.max()) / a.area
+            jj_avg = np.linspace(2e-4, j_max_avg * 0.999, 600)
+            
+            Vhi_interp = np.interp(jj_avg, I_hi / a.area, V_hi)
+            Vlo_interp = np.interp(jj_avg, I_lo / a.area, V_lo)
+            V_avg_ref = 0.5 * (Vhi_interp + Vlo_interp)
+            
+            ax.plot(jj_avg, V_avg_ref, "k.", ms=2, label=ref_labels[cname])
+            ax.plot(jj_avg, vmodel(p, jj_avg, a.T, EN, st), "r-", label=fit_labels[cname])
+            ax.plot(jj_avg, vmodel(base, jj_avg, a.T, EN, st), "b:", label="thesis defaults")
+        
+        ax.set_ylim(0.4, 1.1)
+        ax.set_ylabel("V [V]")
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8, loc="upper right")
+
+    # ---- 4th Subplot: Voltage Difference (Model - Reference in mV) on axs[3]
+    ax_err = axs[3]
+    for cname, p in P.items():
+        if cname in ["high", "low"]:
+            r_num = target_runs[cname]
+            I_run, V_run = runs[r_num]
+            j_run = I_run / a.area
+            jj = np.linspace(2e-4, j_run.max() * 0.999, 600)
+            V_ref_jj = np.interp(jj, j_run, V_run)
+        else:
+            I_hi, V_hi = runs[hi_run]
+            I_lo, V_lo = runs[lo_run]
+            j_max_avg = min(I_hi.max(), I_lo.max()) / a.area
+            jj = np.linspace(2e-4, j_max_avg * 0.999, 600)
+            Vhi_interp = np.interp(jj, I_hi / a.area, V_hi)
+            Vlo_interp = np.interp(jj, I_lo / a.area, V_lo)
+            V_ref_jj = 0.5 * (Vhi_interp + Vlo_interp)
+            
+        V_model_jj = vmodel(p, jj, a.T, EN, st)
+        diff_mV = (V_model_jj - V_ref_jj) * 1000.0
+        ax_err.plot(jj, diff_mV, label=f"{cname} fit error")
+
+    ax_err.set_ylabel("Voltage diff [mV]")
+    ax_err.axhline(0, color="k", linestyle="--", lw=0.8, alpha=0.5)
+    ax_err.grid(alpha=0.3)
+    ax_err.legend(fontsize=8, loc="upper right")
+        
+    axs[2].set_xlabel("I current density [A/cm$^2$]")
+    axs[3].set_xlabel("I current density [A/cm$^2$]")
+    
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    fig.savefig(os.path.join(a.out_dir, "fits.png"), dpi=140)
+    print(f"\nPlots and outputs successfully saved to {a.out_dir}/")
+if __name__ == "__main__":
+    main()
