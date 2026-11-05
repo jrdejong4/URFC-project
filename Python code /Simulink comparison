@@ -1,1 +1,61 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.interpolate import PchipInterpolator
 
+# ---- Settings ----
+block_csv = r"C:\Users\jaspe\Downloads\block_polcurve.csv"
+modelica_csv = r"C:\Users\jaspe\OneDrive\Documenten\thesis documentatie\PEMFuelCell.Tests.DiagramPEMStackSweep\DiagramPEMStackSweep_res.csv"
+n_pts = 1000                 # points in the smooth curves
+i_check = [80, 280]          # nominal and end point of the Simulink preset [A]
+
+# ---- Read data ----
+B = pd.read_csv(block_csv)
+M = pd.read_csv(modelica_csv, usecols=["I_stack", "V_stack"])
+
+# Sort / remove duplicate current values so interpolation works
+Ib, kb = np.unique(B["I_stack"].to_numpy(), return_index=True)
+Vb = B["V_stack"].to_numpy()[kb]
+Im, km = np.unique(M["I_stack"].to_numpy(), return_index=True)
+Vm = M["V_stack"].to_numpy()[km]
+
+# ---- Smooth block curve (pchip: no overshoot on sparse data) ----
+pchip = PchipInterpolator(Ib, Vb)
+Ig = np.linspace(Ib.min(), Ib.max(), n_pts)
+Vg = pchip(Ig)
+
+# ---- Difference on a common current grid ----
+Ic = np.linspace(max(Ib.min(), Im.min()), min(Ib.max(), Im.max()), n_pts)
+dV = np.interp(Ic, Im, Vm) - pchip(Ic)        # Modelica minus Simulink
+
+ix = np.argmax(np.abs(dV))
+print(f"Compared over {Ic[0]:.1f} - {Ic[-1]:.1f} A")
+print(f"RMS difference : {np.sqrt(np.mean(dV**2)):.2f} V")
+print(f"Max difference : {abs(dV[ix]):.2f} V at {Ic[ix]:.1f} A")
+for i0 in i_check:
+    if Ic[0] <= i0 <= Ic[-1]:
+        print(f"At {i0:3d} A: Simulink {float(pchip(i0)):.1f} V | "
+              f"Modelica {np.interp(i0, Im, Vm):.1f} V")
+
+# ---- Plots ----
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9, 7))
+
+ax1.plot(Ig, Vg, "b-", linewidth=1.5, label="Simulink refence model")
+ax1.plot(Im, Vm, "r--", linewidth=1.5, label="Openmodelica Model")
+ax1.set_xlabel("Stack current [A]")
+ax1.set_ylabel("Stack voltage [V]")
+ax1.set_title("Polarization curve: Simulink block vs Modelica")
+ax1.grid(True)
+ax1.set_xlim(0, 280)
+ax1.legend(loc="upper right")
+
+
+ax2.plot(Ic, dV, "k-", linewidth=1.5)
+ax2.set_xlabel("Stack current [A]")
+ax2.set_ylabel("Voltage difference [V]")
+ax2.set_title("Difference on common current grid")
+ax2.grid(True)
+ax2.set_xlim(0, 280)
+fig.tight_layout()
+fig.savefig("polarization_overlay.png", dpi=150)
+plt.show()
