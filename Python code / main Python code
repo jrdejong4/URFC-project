@@ -1,3 +1,5 @@
+#Please note that not all figures created using this script made the final thesis draft. There was not enough time left to clean this up unfortunately
+
 import argparse
 import glob
 import io
@@ -887,7 +889,7 @@ def fig_5_12_openmodelica_vs_simulink():
     show()
 
 
-# Registry of runnable figures (this was missing -> NameError in main()).
+# Registry of runnable figures 
 FIGURES = {
     "5.1":      ("PEM stack FMU: polarisation + outlet temperature", fig_5_1_pem_stack_fmu),
     "5.2":      ("URFC polarisation curve", fig_5_2_polarization_curve),
