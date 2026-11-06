@@ -3,7 +3,7 @@ package PEMFuelCell
     constant Real R = Modelica.Constants.R "Universal gas constant, J/(mol.K)";
     constant Real F = 96485.33212 "Faraday's constant, C/mol";
 
-    function nernstVoltage "Reversible cell voltage. Pressures given in Pa; normalized internally to standard pressure (101325 Pa)."
+    function nernstVoltage "Reversible cell voltage. Pressures given in Pa."
       input Real T "K";
       input Real p_H2 "Pa";
       input Real p_O2 "Pa";
@@ -92,7 +92,7 @@ package PEMFuelCell
   end Functions;
 
   package Models
-    block ThermalManagementSystem "Wrapper around ThermalMass - reusable thermal subsystem"
+    block ThermalManagementSystem " reusable thermal subsystem"
       parameter Real C_th = 40000 "Thermal capacitance, J/K";
       parameter Real E_tn = 1.481 "Thermoneutral voltage per cell, V";
       parameter Real epsilon = 0.8 "Heat exchanger effectiveness";
