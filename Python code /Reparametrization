@@ -1,8 +1,6 @@
 #!/usr/init/env python3
 """
 Parametrization of the URFC cell model on the Gamry potentiostat polarization curves.
-Includes a 4th subplot for voltage difference (residuals in mV), y-axis capped at 1.1V,
-GitHub link import, Run 2 & 8, and custom labels.
 
 usage: python3 fit_urfc_parametrizations.py DATA_DIR OUT_DIR [--area 1.0] [--T 294.35] [--runs 2 8] [--jfit 0.02 0.10]
 """
@@ -18,7 +16,7 @@ R, F, NE = 8.314462618, 96485.33212, 2
 R_CONC_MODEL = 0.01       # ohm*cm2 (= 1e-6 ohm*m2, value in the model)
 
 
-# ------------------------------------------------------------------ data
+# data
 def read_dta(source):
     if source.startswith("http://") or source.startswith("https://"):
         req = urllib.request.urlopen(source)
@@ -83,7 +81,7 @@ def grid_for(jmax, jmin=2e-4, n_lin=250, n_log=150):
     return g
 
 
-# ------------------------------------------------------------------ model
+# model in python
 def e_nernst(T, pH2=1.0, pO2=1.0):
     return 1.229 - 0.85e-3 * (T - 298.15) + R * T / (2 * F) * np.log(pH2 * np.sqrt(pO2))
 
